@@ -11,9 +11,9 @@
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
 - 已通过 JumpServer Ops 作业批量下发只读 Shell 探测命令。
 - 已增强批量 Ops 日志分段匹配，兼容 JumpServer 将主机标签中的空格规范化为下划线等差异，减少不必要的单主机复核。
-- 已支持对 `unreachable`、`probe_timeout`、`parse_error` 等不确定结果执行单主机 Ops 复核，复核成功后会更新为真实可达状态。
-- 已支持提取主机所有全局 IPv4 地址，避免多 IP 主机只按默认路由 IP 比对导致误判。
-- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`parse_error`、`skipped_windows`。
+- 已支持对 `unreachable`、`probe_timeout`、`parse_error`、`ops_no_output`、`ops_module_error` 等不确定结果执行单主机 Ops 复核，复核成功后会更新为真实可达状态。
+- 已支持提取主机所有全局 IPv4 地址，并默认排除 `172.*` Docker 常见地址段，避免多 IP 主机只按默认路由 IP 比对或容器网桥地址导致误判。
+- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`permission_denied`、`no_account`、`parse_error`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
 - 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入等单元测试。
 
@@ -138,10 +138,14 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 - `duplicate_asset`：JumpServer 存在多条相同资产 IP 记录，优先作为历史遗留或重复录入问题标注。
 - `unreachable`：Ops 返回连接失败或无主机输出。
 - `probe_timeout`：批次任务创建失败或轮询超时。
+- `ops_no_output`：Ops 任务成功但没有返回主机输出，会进入单主机复核队列。
+- `ops_module_error`：Ops/Ansible 模块执行异常，会进入单主机复核队列。
+- `permission_denied`：当前 API/Ops 权限无法访问该资产。
+- `no_account`：JumpServer 未找到该资产可用登录账号。
 - `parse_error`：主机有输出，但缺少固定探测 marker。
 - `skipped_windows`：Windows 资产按 SOP 跳过。
 
-`探测来源` 字段用于区分结果来源：`batch` 表示批量 Ops 探测；`single_recheck` 表示批量结果不确定但单主机复核成功；`batch+single_recheck` 表示单主机复核后仍未恢复。
+`探测来源` 字段用于区分结果来源：`batch` 表示批量 Ops 探测；`single_recheck` 表示批量结果不确定且单主机复核拿到了有效分类；`batch+single_recheck` 表示单主机复核后仍未恢复。`单主机复核恢复数` 只统计最终进入 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch` 的记录。
 
 ## 测试
 

@@ -123,7 +123,7 @@ SUCCESS → 按主机解析输出
     └─ IP_TYPE=unknown          → 无法判断，人工核查
     │
     ▼
-对 unreachable / probe_timeout / parse_error 执行单主机复核
+对 unreachable / probe_timeout / parse_error / ops_no_output / ops_module_error 执行单主机复核
     │
     ├─ 复核拿到 DETECT_START → 更新为真实 reachable 分类
     └─ 复核仍失败 → 保留不可达/异常状态并记录复核来源
@@ -271,6 +271,8 @@ ip -o -4 addr show scope global
 
 `IP_ADDR` 用于展示默认路由主 IP，`IP_ADDRS` 用于记录主机当前所有全局 IPv4。比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产记录 IP 存在于该列表，就认为 IP 匹配，避免多 IP 主机被误判为 `ip_mismatch`。
 
+`IP_ADDRS` 默认排除 `172.*` 地址段。该段在当前环境中主要来自 Docker/容器网桥地址，不作为 JumpServer 资产 IP 比对依据；解析历史日志时也会二次过滤，避免容器地址造成误判。
+
 ---
 
 ## 7. 阶段四：下发 Ops 任务并轮询结果
@@ -342,7 +344,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 - Ansible/JMS 日志分段标签与资产名、主机名、IP 不一致，导致解析器无法定位主机输出。
 - 批量任务中部分主机输出被截断或延迟，但单主机作业可正常返回。
 
-因此批量探测完成后，对 `unreachable`、`probe_timeout`、`parse_error` 执行第二阶段单主机复核：
+因此批量探测完成后，对 `unreachable`、`probe_timeout`、`parse_error`、`ops_no_output`、`ops_module_error` 执行第二阶段单主机复核：
 
 ```text
 批量结果为不确定状态
@@ -353,7 +355,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
   -> 若仍无输出或连接失败，保留异常状态，并记录 probe_source=batch+single_recheck
 ```
 
-复核默认使用有界并发，建议 `recheck_concurrency=8`，单主机复核超时建议 60s。复核成功的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果。
+复核默认使用有界并发，建议 `recheck_concurrency=8`，单主机复核超时建议 60s。复核拿到有效探测分类的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果；复核后仍未拿到有效分类的记录标记为 `batch+single_recheck`。报告中的“单主机复核恢复数”只统计最终进入 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch` 的记录。
 
 ---
 
@@ -383,7 +385,7 @@ GET /api/v1/ops/ansible/job-execution/{task_id}/log/
 
 **步骤 2**：从输出中提取 `DETECT_START` 到 `DETECT_END` 之间的内容
 
-- 若找不到这两个标记 → 归类为 `parse_error`（命令执行但输出格式异常）
+- 若找不到这两个标记 → 先识别 Ops 权限、账号、无输出、模块异常等固定失败特征；无法归因时归类为 `parse_error`（命令执行但输出格式异常）
 
 **步骤 3**：解析键值对
 
@@ -407,6 +409,10 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `ip_mismatch` | 实际 IP 与 JumpServer 记录不一致 |
 | `unreachable` | SSH 连接失败，主机不可达 |
 | `probe_timeout` | 任务超时，未能探测 |
+| `ops_no_output` | Ops 任务成功但没有返回主机输出 |
+| `ops_module_error` | Ops/Ansible 模块执行异常 |
+| `permission_denied` | 当前 API/Ops 权限无法访问该资产 |
+| `no_account` | JumpServer 未找到该资产可用登录账号 |
 | `parse_error` | 探测到主机但输出解析失败 |
 
 ---

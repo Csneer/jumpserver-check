@@ -26,7 +26,8 @@ PROFILE_ENDPOINTS = (
     "/api/v1/users/users/profile/",
     "/api/v1/authentication/users/profile/",
 )
-RECHECK_STATUSES = {"unreachable", "probe_timeout", "parse_error"}
+RECHECK_STATUSES = {"unreachable", "probe_timeout", "parse_error", "ops_no_output", "ops_module_error"}
+RECOVERED_STATUSES = {"ok_static", "warn_dhcp", "manual_check", "ip_mismatch"}
 
 
 DETECTION_COMMAND = r'''
@@ -44,14 +45,14 @@ actual_ip="$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 if_name="$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
 
 if command -v ip >/dev/null 2>&1; then
-  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '!seen[$0]++' | paste -sd, -)"
+  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '$0 !~ /^172\./ && !seen[$0]++' | paste -sd, -)"
 fi
 
 if [ -z "$all_ips" ] && command -v hostname >/dev/null 2>&1; then
-  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[$0]++' | paste -sd, -)"
+  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^172\./ && !seen[$0]++' | paste -sd, -)"
 fi
 
-if [ -n "$actual_ip" ]; then
+if [ -n "$actual_ip" ] && ! printf '%s\n' "$actual_ip" | grep -q '^172\.'; then
   case ",$all_ips," in
     *",$actual_ip,"*) ;;
     *) all_ips="${all_ips:+$all_ips,}$actual_ip" ;;
@@ -446,10 +447,14 @@ def parse_kv_block(text: str) -> dict[str, str] | None:
     return values
 
 
-def split_ip_values(value: str) -> list[str]:
+def is_ignored_probe_ip(value: str) -> bool:
+    return value.startswith("172.")
+
+
+def split_ip_values(value: str, *, include_ignored: bool = False) -> list[str]:
     ips: list[str] = []
     for item in re.split(r"[,;\s]+", value.strip()):
-        if item and item not in ips:
+        if item and (include_ignored or not is_ignored_probe_ip(item)) and item not in ips:
             ips.append(item)
     return ips
 
@@ -562,6 +567,23 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         base["remark"] = remark or "未找到该主机的 Ops 输出"
         return base
     lowered = log_segment.lower()
+    if "has no access permission" in lowered or "you do not have access rights" in lowered or "no access permission" in lowered:
+        base["probe_status"] = "permission_denied"
+        base["remark"] = remark or "JumpServer Ops 无资产访问权限"
+        return base
+    if "无可用账号" in log_segment or "no available account" in lowered or "no account" in lowered:
+        base["probe_status"] = "no_account"
+        base["remark"] = remark or "JumpServer Ops 无可用登录账号"
+        return base
+    if "traceback" in lowered or "ansiballz_command.py" in lowered or "module_stderr" in lowered:
+        base["connectivity"] = "ok"
+        base["probe_status"] = "ops_module_error"
+        base["remark"] = remark or "Ops/Ansible 模块执行异常，未拿到有效探测输出"
+        return base
+    if re.search(r"task\s+ops\.tasks\..*succeeded\s+in\s+\d+(?:\.\d+)?s:\s+none", lowered, flags=re.S):
+        base["probe_status"] = "ops_no_output"
+        base["remark"] = remark or "Ops 任务成功但未返回主机输出"
+        return base
     if "error! failed at splitting arguments" in lowered or "unbalanced jinja2 block or quotes" in lowered:
         base["connectivity"] = "ok"
         base["probe_status"] = "parse_error"
@@ -659,12 +681,16 @@ def should_recheck_result(result: dict[str, Any]) -> bool:
     return str(result.get("probe_status") or "") in RECHECK_STATUSES
 
 
+def is_recovered_result(result: dict[str, Any]) -> bool:
+    return str(result.get("probe_status") or "") in RECOVERED_STATUSES
+
+
 def merge_recheck_result(original: dict[str, Any], rechecked: dict[str, Any]) -> dict[str, Any]:
     merged = dict(rechecked)
     merged["probe_source"] = "single_recheck"
     merged["original_probe_status"] = original.get("probe_status", "")
     merged["original_remark"] = original.get("remark", "")
-    if rechecked.get("connectivity") == "ok":
+    if is_recovered_result(rechecked):
         prefix = f"单主机复核恢复；原批量状态 {original.get('probe_status') or 'unknown'}"
         original_remark = original.get("remark")
         if original_remark:
@@ -736,11 +762,15 @@ def run_rechecks(
         for future in as_completed(futures):
             index, merged, batch_record = future.result()
             batch_records.append(batch_record)
-            if results[index].get("connectivity") != "ok" and merged.get("connectivity") == "ok":
+            if not is_recovered_result(results[index]) and is_recovered_result(merged):
                 recovered_count += 1
             updated[index] = merged
 
     return updated, {"recheck_count": len(candidates), "recheck_recovered_count": recovered_count}
+
+
+def count_final_recheck_recoveries(results: list[dict[str, Any]]) -> int:
+    return sum(1 for result in results if result.get("original_probe_status") and is_recovered_result(result))
 
 
 def skipped_windows_result(asset: dict[str, Any]) -> dict[str, Any]:
@@ -805,6 +835,10 @@ PROBLEM_STATUSES = (
     "duplicate_asset",
     "unreachable",
     "probe_timeout",
+    "ops_no_output",
+    "ops_module_error",
+    "permission_denied",
+    "no_account",
     "parse_error",
 )
 
@@ -876,6 +910,10 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "duplicate_asset",
             "unreachable",
             "probe_timeout",
+            "ops_no_output",
+            "ops_module_error",
+            "permission_denied",
+            "no_account",
             "parse_error",
             "skipped_windows",
         )]),
@@ -968,6 +1006,7 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         )
     duplicates = duplicate_asset_map(assets)
     apply_duplicate_asset_annotations(results, duplicates)
+    recheck_stats["recheck_recovered_count"] = count_final_recheck_recoveries(results)
     summary = {
         "total_assets": len(assets),
         "linux_assets": len(linux_assets),

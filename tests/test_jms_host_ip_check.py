@@ -77,6 +77,7 @@ def test_detection_command_is_read_only_and_has_markers():
     assert "DETECT_END" in command
     assert "IP_ADDRS=" in command
     assert "ip -o -4 addr show scope global" in command
+    assert "$0 !~ /^172\\./" in command
     for forbidden in ("rm ", "mv ", "truncate", "reboot", "shutdown", "docker prune", "journalctl --vacuum"):
         assert forbidden not in command
 
@@ -118,6 +119,17 @@ def test_parse_probe_matches_any_detected_ip():
     assert result["ip_match"] is True
 
 
+def test_parse_probe_ignores_172_docker_ips():
+    asset = {"id": "asset-1", "name": "host-a", "address": "172.17.0.1"}
+    segment = "DETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10,172.17.0.1,172.18.0.1\nIF_NAME=eth0\nDETECT_END"
+
+    result = check.classify_probe_result(asset, segment)
+
+    assert result["probe_status"] == "ip_mismatch"
+    assert result["actual_ips"] == "192.0.2.10"
+    assert result["ip_match"] is False
+
+
 def test_parse_probe_dhcp_and_ip_mismatch_priority():
     asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
     segment = "DETECT_START\nIP_TYPE=dhcp\nIP_ADDR=192.0.2.99\nIP_ADDRS=192.0.2.99,198.51.100.99\nIF_NAME=eth0\nDETECT_END"
@@ -145,6 +157,20 @@ def test_parse_probe_unknown_and_parse_error_and_unreachable():
     assert parse_error["probe_status"] == "parse_error"
     assert ansible_parse_error["probe_status"] == "parse_error"
     assert unreachable["probe_status"] == "unreachable"
+
+
+def test_parse_probe_ops_failure_statuses():
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+
+    permission = check.classify_probe_result(asset, "Start adhoc execution error: You do not have access rights to 1 assets")
+    no_account = check.classify_probe_result(asset, "host-a | FAILED! => 无可用账号")
+    no_output = check.classify_probe_result(asset, "Task ops.tasks.run succeeded in 63.072868722025305s: None")
+    module_error = check.classify_probe_result(asset, "module_stderr: Traceback\nAnsiballZ_command.py failed")
+
+    assert permission["probe_status"] == "permission_denied"
+    assert no_account["probe_status"] == "no_account"
+    assert no_output["probe_status"] == "ops_no_output"
+    assert module_error["probe_status"] == "ops_module_error"
 
 
 def test_split_sections_and_select_asset_section():
@@ -240,6 +266,50 @@ def test_single_asset_recheck_recovers_missing_batch_output(monkeypatch):
     assert results[0]["original_probe_status"] == "unreachable"
     assert "单主机复核恢复" in results[0]["remark"]
     assert batch_records[0]["recheck_for"]["asset_id"] == "asset-1"
+
+
+def test_single_asset_recheck_parse_error_is_not_recovered(monkeypatch):
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    original = check.classify_probe_result(asset, "")
+    batch_records = []
+
+    def fake_run_batch(client, batch, batch_index, timeout, poll_interval, runas):
+        return {
+            "batch_index": batch_index,
+            "results": [check.classify_probe_result(asset, "changed: [host-a] => command output without markers")],
+        }
+
+    monkeypatch.setattr(check, "run_batch", fake_run_batch)
+
+    results, stats = check.run_rechecks(
+        client=object(),
+        results=[original],
+        asset_by_id={"asset-1": asset},
+        timeout=60,
+        poll_interval=2,
+        runas="root",
+        max_rechecks=None,
+        concurrency=4,
+        no_proxy=True,
+        batch_records=batch_records,
+        client_factory=lambda: object(),
+    )
+
+    assert stats == {"recheck_count": 1, "recheck_recovered_count": 0}
+    assert results[0]["probe_status"] == "parse_error"
+    assert results[0]["probe_source"] == "batch+single_recheck"
+    assert "单主机复核恢复" not in results[0]["remark"]
+
+
+def test_final_recheck_recovery_count_excludes_duplicate_asset():
+    results = [
+        {"probe_status": "ok_static", "original_probe_status": "unreachable"},
+        {"probe_status": "duplicate_asset", "original_probe_status": "unreachable"},
+        {"probe_status": "parse_error", "original_probe_status": "unreachable"},
+        {"probe_status": "ok_static", "original_probe_status": ""},
+    ]
+
+    assert check.count_final_recheck_recoveries(results) == 1
 
 
 def test_markdown_report_and_latest_written(tmp_path: Path):
