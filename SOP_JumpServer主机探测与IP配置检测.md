@@ -55,8 +55,6 @@
   -> 轮询任务状态
   -> 获取执行日志
   -> 解析并分类
-  -> 对不确定结果执行单主机复核
-  -> 合并复核结果
   -> 生成 Markdown / JSON 报告
 ```
 
@@ -110,23 +108,17 @@
 POST /api/v1/ops/jobs/  →  获取 task_id
     │
     ▼
-轮询 Task 状态（最长等待 120s）
+轮询 Task 状态（最长等待 40s）
     │
     ├─ FAILURE / 超时 → 记录"探测失败"，不重试本批（等下一轮）
     │
     ▼
 SUCCESS → 按主机解析输出
     │
-    ├─ 无输出 / exit code 非 0 → 主机不可达
+    ├─ 无输出 / exit code 非 0 → Ops 无结果或连接失败
     ├─ IP_TYPE=dhcp             → 动态IP告警
     ├─ IP_TYPE=static           → 正常
     └─ IP_TYPE=unknown          → 无法判断，人工核查
-    │
-    ▼
-对 unreachable / probe_timeout / parse_error / ops_no_output / ops_module_error 执行单主机复核
-    │
-    ├─ 复核拿到 DETECT_START → 更新为真实 reachable 分类
-    └─ 复核仍失败 → 保留不可达/异常状态并记录复核来源
     │
     ▼
 连续 2 次不可达 → 触发禁用 / 通知
@@ -174,7 +166,7 @@ GET /api/v1/users/profile/
 | `api_token` | API Key |
 | `system_user_id` | 执行 Ops 任务使用的系统用户 ID |
 | `batch_size` | 每批主机数量，建议 30–50 |
-| `task_timeout` | 单批任务等待超时，建议 120s |
+| `task_timeout` | 单批任务等待超时，建议 40s |
 | `poll_interval` | 轮询间隔，建议 3s |
 | `report_path` | 报告输出路径 |
 
@@ -291,7 +283,7 @@ Content-Type: application/json
   "assets": ["asset_id_1", "asset_id_2"],
   "runas_policy": "skip",
   "runas": "root",
-  "timeout": 120,
+  "timeout": 40,
   "instant": true,
   "is_periodic": false
 }
@@ -326,7 +318,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 ### 7.4 轮询超时处理
 
-- 超时阈值：`task_timeout`（建议 120s）
+- 超时阈值：`task_timeout`（建议 40s）
 - 超过阈值后，无论状态如何，停止等待。
 - 将本批所有主机记录为 `probe_timeout`，在报告中单独标记。
 - **不主动取消 Task**，避免影响 JumpServer 队列状态。
@@ -336,26 +328,15 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 - 同时处理的批次数建议 ≤ 3，避免 JumpServer Celery 队列积压。
 - 批次间建议间隔 2s 再下发下一批。
 
-### 7.6 单主机复核链路
+### 7.6 无结果处理
 
-批量 Ops 日志可能出现以下误判来源：
+批量 Ops 日志可能出现以下无结果来源：
 
 - 批次日志没有返回某台主机分段，但交互连接实际可达。
 - Ansible/JMS 日志分段标签与资产名、主机名、IP 不一致，导致解析器无法定位主机输出。
-- 批量任务中部分主机输出被截断或延迟，但单主机作业可正常返回。
+- JumpServer Ops API 返回成功但日志为 `None`，实际交互连接仍可能可达。
 
-因此批量探测完成后，对 `unreachable`、`probe_timeout`、`parse_error`、`ops_no_output`、`ops_module_error` 执行第二阶段单主机复核：
-
-```text
-批量结果为不确定状态
-  -> 使用同一个资产 id 单独创建 Ops 作业
-  -> 轮询单主机任务
-  -> 获取单主机日志
-  -> 若出现 DETECT_START/DETECT_END，重新分类为 ok_static / warn_dhcp / manual_check / ip_mismatch
-  -> 若仍无输出或连接失败，保留异常状态，并记录 probe_source=batch+single_recheck
-```
-
-复核默认使用有界并发，建议 `recheck_concurrency=8`，单主机复核超时建议 60s。复核拿到有效探测分类的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果；复核后仍未拿到有效分类的记录标记为 `batch+single_recheck`。报告中的“单主机复核恢复数”只统计最终进入 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch` 的记录。
+当前版本不再执行单主机 Ops 复核。批量无结果直接保留为 `unreachable`、`ops_no_output`、`probe_timeout`、`parse_error` 等分类，其中 `ops_no_output` 不等同于主机不可达，需要按报告列表抽样走 JumpServer 交互连接或其他链路核查。
 
 ---
 
@@ -381,7 +362,7 @@ GET /api/v1/ops/ansible/job-execution/{task_id}/log/
 
 **步骤 1**：判断是否有有效输出
 
-- 无输出 / 命令 exit code 非 0 → 先归类为 `unreachable`，再进入单主机复核队列，不直接认定主机最终不可达。
+- 无输出 / 命令 exit code 非 0 → 归类为 `unreachable` 或对应 Ops 异常类型，不再执行单主机 Ops 复核。
 
 **步骤 2**：从输出中提取 `DETECT_START` 到 `DETECT_END` 之间的内容
 
@@ -477,9 +458,9 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `ip_type` | static / dhcp / unknown |
 | `connectivity` | ok / unreachable |
 | `probe_status` | ok_static / warn_dhcp / unreachable / probe_timeout 等 |
-| `probe_source` | batch / single_recheck / batch+single_recheck / skipped |
-| `original_probe_status` | 单主机复核前的批量探测状态 |
-| `original_remark` | 单主机复核前的批量探测备注 |
+| `probe_source` | batch / skipped |
+| `original_probe_status` | 保留字段，当前批量-only 链路为空 |
+| `original_remark` | 保留字段，当前批量-only 链路为空 |
 | `node` | 所属节点/分组 |
 | `remark` | 备注（如：连续 N 次失败） |
 
@@ -553,11 +534,9 @@ jumpserver:
 
 detection:
   batch_size: 50          # 每批主机数
-  task_timeout: 120       # 单批任务超时（秒）
+  task_timeout: 40        # 单批任务超时（秒）
   poll_interval: 3        # 轮询间隔（秒）
   max_concurrent_batches: 3   # 最大并发批次数
-  recheck_timeout: 60     # 单主机复核超时（秒）
-  recheck_concurrency: 8  # 单主机复核并发数
   consecutive_fail_threshold: 2  # 连续失败多少次触发处置
 
 report:

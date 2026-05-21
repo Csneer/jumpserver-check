@@ -226,92 +226,6 @@ DETECT_END
     assert check.section_for_asset({"name": "host a"}, log, batch_size=2) == ""
 
 
-def test_single_asset_recheck_recovers_missing_batch_output(monkeypatch):
-    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
-    original = check.classify_probe_result(asset, "")
-    batch_records = []
-
-    def fake_run_batch(client, batch, batch_index, timeout, poll_interval, runas):
-        assert batch == [asset]
-        return {
-            "batch_index": batch_index,
-            "results": [
-                check.classify_probe_result(
-                    asset,
-                    "DETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10\nIF_NAME=ens18\nDETECT_END",
-                )
-            ],
-        }
-
-    monkeypatch.setattr(check, "run_batch", fake_run_batch)
-
-    results, stats = check.run_rechecks(
-        client=object(),
-        results=[original],
-        asset_by_id={"asset-1": asset},
-        timeout=90,
-        poll_interval=2,
-        runas="root",
-        max_rechecks=None,
-        concurrency=4,
-        no_proxy=True,
-        batch_records=batch_records,
-        client_factory=lambda: object(),
-    )
-
-    assert stats == {"recheck_count": 1, "recheck_recovered_count": 1}
-    assert results[0]["probe_status"] == "ok_static"
-    assert results[0]["connectivity"] == "ok"
-    assert results[0]["probe_source"] == "single_recheck"
-    assert results[0]["original_probe_status"] == "unreachable"
-    assert "单主机复核恢复" in results[0]["remark"]
-    assert batch_records[0]["recheck_for"]["asset_id"] == "asset-1"
-
-
-def test_single_asset_recheck_parse_error_is_not_recovered(monkeypatch):
-    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
-    original = check.classify_probe_result(asset, "")
-    batch_records = []
-
-    def fake_run_batch(client, batch, batch_index, timeout, poll_interval, runas):
-        return {
-            "batch_index": batch_index,
-            "results": [check.classify_probe_result(asset, "changed: [host-a] => command output without markers")],
-        }
-
-    monkeypatch.setattr(check, "run_batch", fake_run_batch)
-
-    results, stats = check.run_rechecks(
-        client=object(),
-        results=[original],
-        asset_by_id={"asset-1": asset},
-        timeout=60,
-        poll_interval=2,
-        runas="root",
-        max_rechecks=None,
-        concurrency=4,
-        no_proxy=True,
-        batch_records=batch_records,
-        client_factory=lambda: object(),
-    )
-
-    assert stats == {"recheck_count": 1, "recheck_recovered_count": 0}
-    assert results[0]["probe_status"] == "parse_error"
-    assert results[0]["probe_source"] == "batch+single_recheck"
-    assert "单主机复核恢复" not in results[0]["remark"]
-
-
-def test_final_recheck_recovery_count_excludes_duplicate_asset():
-    results = [
-        {"probe_status": "ok_static", "original_probe_status": "unreachable"},
-        {"probe_status": "duplicate_asset", "original_probe_status": "unreachable"},
-        {"probe_status": "parse_error", "original_probe_status": "unreachable"},
-        {"probe_status": "ok_static", "original_probe_status": ""},
-    ]
-
-    assert check.count_final_recheck_recoveries(results) == 1
-
-
 def test_markdown_report_and_latest_written(tmp_path: Path):
     results = [
         {
@@ -336,7 +250,7 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
             "if_name": "eth0",
             "ip_type": "static",
             "probe_status": "ip_mismatch",
-            "probe_source": "single_recheck",
+            "probe_source": "batch",
             "node": "运维",
             "remark": "实际 IP 与 JumpServer 资产 IP 不一致",
         }
@@ -364,6 +278,6 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
     assert "host-b" in content
     assert "探测IP列表" in content
     assert "探测来源" in content
-    assert "single_recheck" in content
+    assert "batch" in content
     assert "## 异常主机" in content
     assert "## 全量明细" in content
