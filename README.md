@@ -10,8 +10,9 @@
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个 CLI 子命令。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
 - 已通过 JumpServer Ops 作业批量下发只读 Shell 探测命令。
+- 已支持提取主机所有全局 IPv4 地址，避免多 IP 主机只按默认路由 IP 比对导致误判。
 - 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`parse_error`、`skipped_windows`。
-- 已生成 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
+- 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
 - 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入等单元测试。
 
 ## 配置
@@ -119,6 +120,8 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 ```markdown
 # JumpServer 主机探测与 IP 配置检测报告
 ```
+
+报告包含 `问题分类索引`、`异常主机`、`全量明细` 三块内容。`问题分类索引` 会按 `warn_dhcp`、`ip_mismatch`、`duplicate_asset`、`unreachable` 等状态给出简短主机列表，便于先定位问题类型；完整字段和全部记录仍在后面的明细表中。
 
 ## 分类
 

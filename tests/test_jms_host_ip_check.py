@@ -75,6 +75,8 @@ def test_detection_command_is_read_only_and_has_markers():
 
     assert "DETECT_START" in command
     assert "DETECT_END" in command
+    assert "IP_ADDRS=" in command
+    assert "ip -o -4 addr show scope global" in command
     for forbidden in ("rm ", "mv ", "truncate", "reboot", "shutdown", "docker prune", "journalctl --vacuum"):
         assert forbidden not in command
 
@@ -101,17 +103,31 @@ changed: [host-a] => {"stdout": "DETECT_START\\nIP_TYPE=static\\nIP_ADDR=192.0.2
     assert result["connectivity"] == "ok"
     assert result["ip_match"] is True
     assert result["if_name"] == "ens3"
+    assert result["actual_ips"] == "192.0.2.10"
+
+
+def test_parse_probe_matches_any_detected_ip():
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    segment = "DETECT_START\nIP_TYPE=static\nIP_ADDR=198.51.100.8\nIP_ADDRS=198.51.100.8,192.0.2.10\nIF_NAME=eth0\nDETECT_END"
+
+    result = check.classify_probe_result(asset, segment)
+
+    assert result["probe_status"] == "ok_static"
+    assert result["actual_ip"] == "198.51.100.8"
+    assert result["actual_ips"] == "198.51.100.8, 192.0.2.10"
+    assert result["ip_match"] is True
 
 
 def test_parse_probe_dhcp_and_ip_mismatch_priority():
     asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
-    segment = "DETECT_START\nIP_TYPE=dhcp\nIP_ADDR=192.0.2.99\nIF_NAME=eth0\nDETECT_END"
+    segment = "DETECT_START\nIP_TYPE=dhcp\nIP_ADDR=192.0.2.99\nIP_ADDRS=192.0.2.99,198.51.100.99\nIF_NAME=eth0\nDETECT_END"
 
     result = check.classify_probe_result(asset, segment)
 
     assert result["probe_status"] == "ip_mismatch"
     assert result["ip_type"] == "dhcp"
     assert result["ip_match"] is False
+    assert result["actual_ips"] == "192.0.2.99, 198.51.100.99"
 
 
 def test_parse_probe_unknown_and_parse_error_and_unreachable():
@@ -155,12 +171,25 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
             "asset_name": "host-a",
             "asset_ip": "198.51.100.1",
             "actual_ip": "198.51.100.1",
+            "actual_ips": "198.51.100.1, 192.0.2.10",
             "ip_match": True,
             "if_name": "ens3",
             "ip_type": "static",
             "probe_status": "ok_static",
             "node": "中间件",
             "remark": "",
+        },
+        {
+            "asset_name": "host-b",
+            "asset_ip": "198.51.100.2",
+            "actual_ip": "198.51.100.200",
+            "actual_ips": "198.51.100.200, 192.0.2.20",
+            "ip_match": False,
+            "if_name": "eth0",
+            "ip_type": "static",
+            "probe_status": "ip_mismatch",
+            "node": "运维",
+            "remark": "实际 IP 与 JumpServer 资产 IP 不一致",
         }
     ]
     started = check.dt.datetime(2026, 5, 19, 10, 0, tzinfo=check.dt.timezone.utc).astimezone()
@@ -181,5 +210,9 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
     assert report.exists()
     content = latest.read_text(encoding="utf-8")
     assert content.startswith("# JumpServer 主机探测与 IP 配置检测报告")
+    assert "## 问题分类索引" in content
+    assert "### ip_mismatch（1）" in content
+    assert "host-b" in content
+    assert "探测IP列表" in content
     assert "## 异常主机" in content
     assert "## 全量明细" in content

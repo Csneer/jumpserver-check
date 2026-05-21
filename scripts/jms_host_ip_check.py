@@ -34,11 +34,31 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
 ip_type="unknown"
 actual_ip=""
+all_ips=""
 if_name=""
 
 route_line="$(ip route get 1.1.1.1 2>/dev/null | head -1)"
 actual_ip="$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
 if_name="$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+
+if command -v ip >/dev/null 2>&1; then
+  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '!seen[$0]++' | paste -sd, -)"
+fi
+
+if [ -z "$all_ips" ] && command -v hostname >/dev/null 2>&1; then
+  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !seen[$0]++' | paste -sd, -)"
+fi
+
+if [ -n "$actual_ip" ]; then
+  case ",$all_ips," in
+    *",$actual_ip,"*) ;;
+    *) all_ips="${all_ips:+$all_ips,}$actual_ip" ;;
+  esac
+fi
+
+if [ -z "$actual_ip" ] && [ -n "$all_ips" ]; then
+  actual_ip="$(printf '%s\n' "$all_ips" | cut -d, -f1)"
+fi
 
 if [ "$ip_type" = "unknown" ] && [ -d /etc/NetworkManager/system-connections ]; then
   for f in /etc/NetworkManager/system-connections/*.nmconnection; do
@@ -105,6 +125,7 @@ fi
 printf '%s\n' 'DETECT_START'
 printf 'IP_TYPE=%s\n' "$ip_type"
 printf 'IP_ADDR=%s\n' "$actual_ip"
+printf 'IP_ADDRS=%s\n' "$all_ips"
 printf 'IF_NAME=%s\n' "$if_name"
 printf '%s\n' 'DETECT_END'
 '''.strip()
@@ -423,6 +444,14 @@ def parse_kv_block(text: str) -> dict[str, str] | None:
     return values
 
 
+def split_ip_values(value: str) -> list[str]:
+    ips: list[str] = []
+    for item in re.split(r"[,;\s]+", value.strip()):
+        if item and item not in ips:
+            ips.append(item)
+    return ips
+
+
 def host_labels(asset: dict[str, Any]) -> set[str]:
     labels = {
         str(asset.get("name") or ""),
@@ -465,6 +494,7 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         "asset_name": asset_name(asset),
         "asset_ip": asset_ip(asset),
         "actual_ip": "",
+        "actual_ips": "",
         "ip_match": "",
         "if_name": "",
         "ip_type": "",
@@ -495,13 +525,17 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         return base
     ip_type = (values.get("IP_TYPE") or "unknown").lower()
     actual_ip = values.get("IP_ADDR") or ""
+    actual_ips = split_ip_values(values.get("IP_ADDRS") or actual_ip)
+    if actual_ip and actual_ip not in actual_ips:
+        actual_ips.insert(0, actual_ip)
     recorded_ip = asset_ip(asset)
     ip_match: bool | str = ""
-    if recorded_ip and actual_ip:
-        ip_match = recorded_ip == actual_ip
+    if recorded_ip and actual_ips:
+        ip_match = recorded_ip in actual_ips
     base.update(
         {
             "actual_ip": actual_ip,
+            "actual_ips": ", ".join(actual_ips),
             "ip_match": ip_match,
             "if_name": values.get("IF_NAME") or "",
             "ip_type": ip_type,
@@ -574,6 +608,7 @@ def skipped_windows_result(asset: dict[str, Any]) -> dict[str, Any]:
         "asset_name": asset_name(asset),
         "asset_ip": asset_ip(asset),
         "actual_ip": "",
+        "actual_ips": "",
         "ip_match": "",
         "if_name": "",
         "ip_type": "",
@@ -608,6 +643,7 @@ def result_row(result: dict[str, Any]) -> list[Any]:
         result.get("asset_name", ""),
         result.get("asset_ip", ""),
         result.get("actual_ip", ""),
+        result.get("actual_ips", ""),
         result.get("ip_match", ""),
         result.get("if_name", ""),
         result.get("ip_type", ""),
@@ -617,10 +653,60 @@ def result_row(result: dict[str, Any]) -> list[Any]:
     ]
 
 
+PROBLEM_STATUSES = (
+    "warn_dhcp",
+    "manual_check",
+    "ip_mismatch",
+    "duplicate_asset",
+    "unreachable",
+    "probe_timeout",
+    "parse_error",
+)
+
+
+def issue_index_rows(results: list[dict[str, Any]], status: str, limit: int = 30) -> list[list[Any]]:
+    rows = []
+    for result in results:
+        if result.get("probe_status") != status:
+            continue
+        rows.append(
+            [
+                result.get("asset_name", ""),
+                result.get("asset_ip", ""),
+                result.get("actual_ips") or result.get("actual_ip", ""),
+                result.get("node", ""),
+                result.get("remark", ""),
+            ]
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str], limit: int = 30) -> list[str]:
+    lines = ["## 问题分类索引", ""]
+    issue_headers = ["资产名称", "资产IP", "探测IP列表", "节点", "备注"]
+    has_issue = False
+    for status in PROBLEM_STATUSES:
+        count = status_counts.get(status, 0)
+        if count <= 0:
+            continue
+        has_issue = True
+        lines.extend([f"### {status}（{count}）", ""])
+        lines.append(markdown_table(issue_headers, issue_index_rows(results, status, limit=limit)))
+        if count > limit:
+            lines.extend([f"> 仅展示前 {limit} 条，完整记录见下方异常主机表。", ""])
+        else:
+            lines.append("")
+    if not has_issue:
+        lines.append("无异常主机。")
+    return lines
+
+
 def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime, finished_at: dt.datetime, summary: dict[str, Any]) -> str:
     status_counts = Counter(result["probe_status"] for result in results)
     abnormal = [result for result in results if result.get("probe_status") not in {"ok_static"}]
-    headers = ["资产名称", "资产IP", "实际IP", "IP一致", "网卡", "IP类型", "探测状态", "节点", "备注"]
+    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "探测状态", "节点", "备注"]
     lines = [
         "# JumpServer 主机探测与 IP 配置检测报告",
         "",
@@ -646,6 +732,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "skipped_windows",
         )]),
         "",
+        *build_issue_index(results, status_counts),
         "## 异常主机",
         "",
         markdown_table(headers, [result_row(result) for result in abnormal]),

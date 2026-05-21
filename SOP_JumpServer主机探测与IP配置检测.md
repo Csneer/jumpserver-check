@@ -232,7 +232,8 @@ GET /api/v1/assets/assets/
 ```
 DETECT_START
 IP_TYPE=static       # 或 dhcp / unknown
-IP_ADDR=192.0.2.10
+IP_ADDR=192.0.2.10   # 默认路由主 IP
+IP_ADDRS=192.0.2.10,198.51.100.10
 IF_NAME=ens3
 DETECT_END
 ```
@@ -251,15 +252,16 @@ DETECT_END
 
 命令内部按以上顺序依次尝试，遇到第一个有效结果即输出并退出判断。
 
-### 6.4 获取当前主 IP 的方法
+### 6.4 获取主机 IP 的方法
 
-优先使用 JumpServer 中记录的 IP，同时命令内补充一个实际探测：
+命令同时采集默认路由主 IP 和全部全局 IPv4 地址：
 
 ```
 ip route get 1.1.1.1 | grep -oP 'src \K[\d.]+'
+ip -o -4 addr show scope global
 ```
 
-用于对比配置 IP 与实际 IP 是否一致（不一致可能已发生 IP 变更）。
+`IP_ADDR` 用于展示默认路由主 IP，`IP_ADDRS` 用于记录主机当前所有全局 IPv4。比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产记录 IP 存在于该列表，就认为 IP 匹配，避免多 IP 主机被误判为 `ip_mismatch`。
 
 ---
 
@@ -358,7 +360,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 
 **步骤 4**：比对 IP
 
-- 若命令输出的 `IP_ADDR` 与 JumpServer 资产记录的 IP 不一致 → 追加标记 `ip_mismatch`，无论 IP 类型如何都需人工核查
+- 若 JumpServer 资产记录的 IP 不在命令输出的 `IP_ADDRS` 列表中 → 追加标记 `ip_mismatch`，无论 IP 类型如何都需人工核查
 
 ### 8.3 分类汇总
 
@@ -427,7 +429,8 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `asset_id` | JumpServer 资产 ID |
 | `hostname` | 主机名 |
 | `asset_ip` | JumpServer 记录的 IP |
-| `actual_ip` | 命令探测到的实际 IP |
+| `actual_ip` | 命令探测到的默认路由主 IP |
+| `actual_ips` | 命令探测到的全局 IPv4 列表 |
 | `ip_match` | IP 是否一致（true/false） |
 | `if_name` | 网卡名称 |
 | `ip_type` | static / dhcp / unknown |
@@ -435,6 +438,8 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `probe_status` | ok_static / warn_dhcp / unreachable / probe_timeout 等 |
 | `node` | 所属节点/分组 |
 | `remark` | 备注（如：连续 N 次失败） |
+
+Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主机列表；随后输出 `异常主机` 完整表和 `全量明细`。问题分类索引用于快速定位某类问题，完整排查仍以异常主机表和全量明细为准。
 
 ### 10.2 汇总统计（报告头部）
 
