@@ -173,6 +173,22 @@ def test_parse_probe_ops_failure_statuses():
     assert module_error["probe_status"] == "ops_module_error"
 
 
+def test_parse_probe_host_unreachable_wins_over_task_none_footer():
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    log = """
+host-a | UNREACHABLE! => {
+    "msg": "Failed to connect to the host via ssh: No route to host",
+    "unreachable": true
+}
+Task ops.tasks.run_ops_job_execution[abc] succeeded in 7.4s: None
+"""
+
+    result = check.classify_probe_result(asset, log)
+
+    assert result["probe_status"] == "unreachable"
+    assert result["remark"] == "JumpServer Ops 返回连接失败"
+
+
 def test_split_sections_and_select_asset_section():
     log = """
 changed: [host-a] => {"stdout": "DETECT_START\\nIP_TYPE=static\\nIP_ADDR=198.51.100.1\\nDETECT_END"}

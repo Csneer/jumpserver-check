@@ -574,10 +574,6 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         base["probe_status"] = "ops_module_error"
         base["remark"] = remark or "Ops/Ansible 模块执行异常，未拿到有效探测输出"
         return base
-    if re.search(r"task\s+ops\.tasks\..*succeeded\s+in\s+\d+(?:\.\d+)?s:\s+none", lowered, flags=re.S):
-        base["probe_status"] = "ops_no_output"
-        base["remark"] = remark or "Ops 任务成功但未返回主机输出"
-        return base
     if "error! failed at splitting arguments" in lowered or "unbalanced jinja2 block or quotes" in lowered:
         base["connectivity"] = "ok"
         base["probe_status"] = "parse_error"
@@ -585,6 +581,10 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         return base
     if "unreachable" in lowered or "failed to connect" in lowered or "permission denied" in lowered:
         base["remark"] = remark or "JumpServer Ops 返回连接失败"
+        return base
+    if re.search(r"task\s+ops\.tasks\..*succeeded\s+in\s+\d+(?:\.\d+)?s:\s+none", lowered, flags=re.S):
+        base["probe_status"] = "ops_no_output"
+        base["remark"] = remark or "Ops 任务成功但未返回主机输出"
         return base
     values = parse_kv_block(log_segment)
     if values is None:
@@ -655,6 +655,11 @@ def run_batch(client: JumpServerClient, batch: list[dict[str, Any]], batch_index
 
     timed_out = not task.get("is_finished")
     batch_record["task"] = {"is_finished": task.get("is_finished"), "is_success": task.get("is_success"), "job_id": task.get("job_id")}
+    if task.get("job_id"):
+        job_detail_status, job_detail = client.get(f"/api/v1/ops/jobs/{task['job_id']}/")
+        batch_record["job_detail_status"] = job_detail_status
+        if isinstance(job_detail, dict):
+            batch_record["job_summary"] = job_detail.get("summary")
     if timed_out:
         batch_record["results"] = [
             classify_probe_result(asset, "", timed_out=True, remark=f"批次任务超时，task_id={task_id}") for asset in batch
