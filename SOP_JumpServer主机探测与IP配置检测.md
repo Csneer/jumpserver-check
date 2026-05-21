@@ -50,7 +50,7 @@
 初始化鉴权
   -> 拉取活跃资产
   -> 跳过 Windows 资产
-  -> Linux / 非 Windows 资产分批
+  -> Linux / 非 Windows 资产逐台创建 Ops job（有界并发）
   -> 创建 JumpServer Ops 作业
   -> 轮询任务状态
   -> 获取执行日志
@@ -98,7 +98,7 @@
     ├─ Windows → 跳过，加入"已排除"列表
     │
     ▼
-按 ≤50 台分批
+按单资产 job 有界并发
     │
     ▼
 构造复合 Shell 命令
@@ -108,7 +108,7 @@
 POST /api/v1/ops/jobs/  →  获取 task_id
     │
     ▼
-轮询 Task 状态（最长等待 40s）
+轮询 Task 状态（本地最长等待 60s）
     │
     ├─ FAILURE / 超时 → 记录"探测失败"，不重试本批（等下一轮）
     │
@@ -165,8 +165,10 @@ GET /api/v1/users/profile/
 | `base_url` | JumpServer 地址，如 `https://jumpserver.example.com` |
 | `api_token` | API Key |
 | `system_user_id` | 执行 Ops 任务使用的系统用户 ID |
-| `batch_size` | 每批主机数量，建议 30–50 |
-| `task_timeout` | 单批任务等待超时，建议 40s |
+| `execution_mode` | 执行模式，准确报告使用 `single` |
+| `concurrency` | 单资产 job 并发数，建议 8–12 |
+| `task_timeout` | JumpServer job timeout，建议 `-1` 对齐 Web 控制台 |
+| `wait_timeout` | 本地轮询等待超时，建议 60s |
 | `poll_interval` | 轮询间隔，建议 3s |
 | `report_path` | 报告输出路径 |
 
@@ -280,10 +282,11 @@ Content-Type: application/json
   "type": "adhoc",
   "module": "shell",
   "args": "<复合探测命令>",
-  "assets": ["asset_id_1", "asset_id_2"],
+  "assets": ["asset_id_1"],
+  "nodes": [],
   "runas_policy": "skip",
   "runas": "root",
-  "timeout": 40,
+  "timeout": -1,
   "instant": true,
   "is_periodic": false
 }
@@ -318,7 +321,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 ### 7.4 轮询超时处理
 
-- 超时阈值：`task_timeout`（建议 40s）
+- 超时阈值：`wait_timeout`（建议 60s）
 - 超过阈值后，无论状态如何，停止等待。
 - 将本批所有主机记录为 `probe_timeout`，在报告中单独标记。
 - **不主动取消 Task**，避免影响 JumpServer 队列状态。
@@ -328,15 +331,17 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 - 同时处理的批次数建议 ≤ 3，避免 JumpServer Celery 队列积压。
 - 批次间建议间隔 2s 再下发下一批。
 
-### 7.6 无结果处理
+### 7.6 执行模式
 
-批量 Ops 日志可能出现以下无结果来源：
+准确报告使用 `single` 模式：每台 Linux 资产单独创建一个 Ops job，有界并发执行。这样每个结果都有独立的 `task_id`、日志和 job summary，避免批量日志中某台主机输出缺失时污染最终结论。
+
+`batch` 模式仅用于快速粗扫。批量 Ops 日志可能出现以下无结果来源：
 
 - 批次日志没有返回某台主机分段，但交互连接实际可达。
 - Ansible/JMS 日志分段标签与资产名、主机名、IP 不一致，导致解析器无法定位主机输出。
 - JumpServer Ops API 返回成功但日志为 `None`，实际交互连接仍可能可达。
 
-当前版本不再执行单主机 Ops 复核。批量无结果直接保留为 `unreachable`、`ops_no_output`、`probe_timeout`、`parse_error` 等分类，其中 `ops_no_output` 不等同于主机不可达，需要按报告列表抽样走 JumpServer 交互连接或其他链路核查。
+批量模式产生的无输出结果不应作为绝对不可达结论。需要准确结果时必须使用 `single` 模式重新执行。
 
 ---
 
@@ -533,8 +538,10 @@ jumpserver:
   system_user_id: "xxxx-xxxx-xxxx-xxxx"
 
 detection:
-  batch_size: 50          # 每批主机数
-  task_timeout: 40        # 单批任务超时（秒）
+  execution_mode: single  # single 准确模式；batch 快速粗扫
+  concurrency: 12         # 单资产 job 并发数
+  task_timeout: -1        # JumpServer job timeout，-1 对齐 Web 控制台
+  wait_timeout: 60        # 本地轮询等待超时（秒）
   poll_interval: 3        # 轮询间隔（秒）
   max_concurrent_batches: 3   # 最大并发批次数
   consecutive_fail_threshold: 2  # 连续失败多少次触发处置

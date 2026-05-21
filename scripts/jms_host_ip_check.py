@@ -13,6 +13,7 @@ import re
 import ssl
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
@@ -408,6 +409,7 @@ def build_ops_payload(batch: list[dict[str, Any]], batch_index: int, timeout: in
         "module": "shell",
         "args": DETECTION_COMMAND,
         "assets": asset_ids,
+        "nodes": [],
         "runas_policy": "skip",
         "runas": runas,
         "timeout": timeout,
@@ -627,7 +629,15 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
     return base
 
 
-def run_batch(client: JumpServerClient, batch: list[dict[str, Any]], batch_index: int, timeout: int, poll_interval: int, runas: str) -> dict[str, Any]:
+def run_batch(
+    client: JumpServerClient,
+    batch: list[dict[str, Any]],
+    batch_index: int,
+    timeout: int,
+    poll_interval: int,
+    runas: str,
+    wait_timeout: int,
+) -> dict[str, Any]:
     payload = build_ops_payload(batch, batch_index, timeout, runas=runas)
     create_status, created = client.post("/api/v1/ops/jobs/", payload)
     task_id = created.get("task_id") if isinstance(created, dict) else None
@@ -644,18 +654,32 @@ def run_batch(client: JumpServerClient, batch: list[dict[str, Any]], batch_index
         ]
         return batch_record
 
-    deadline = time.time() + timeout + 30
+    deadline = time.time() + wait_timeout
     task: dict[str, Any] = {}
     while time.time() < deadline:
         task_status, task_payload = client.get(f"/api/v1/ops/job-execution/task-detail/{task_id}/")
         task = task_payload if isinstance(task_payload, dict) else {}
-        batch_record["polls"].append({"status": task_status, "is_finished": task.get("is_finished"), "is_success": task.get("is_success")})
+        batch_record["polls"].append(
+            {
+                "status": task_status,
+                "job_status": task.get("status"),
+                "is_finished": task.get("is_finished"),
+                "is_success": task.get("is_success"),
+                "summary": task.get("summary"),
+            }
+        )
         if task.get("is_finished"):
             break
         time.sleep(poll_interval)
 
     timed_out = not task.get("is_finished")
-    batch_record["task"] = {"is_finished": task.get("is_finished"), "is_success": task.get("is_success"), "job_id": task.get("job_id")}
+    batch_record["task"] = {
+        "status": task.get("status"),
+        "is_finished": task.get("is_finished"),
+        "is_success": task.get("is_success"),
+        "job_id": task.get("job_id"),
+        "summary": task.get("summary"),
+    }
     if task.get("job_id"):
         job_detail_status, job_detail = client.get(f"/api/v1/ops/jobs/{task['job_id']}/")
         batch_record["job_detail_status"] = job_detail_status
@@ -670,11 +694,45 @@ def run_batch(client: JumpServerClient, batch: list[dict[str, Any]], batch_index
     log_status, log_payload = client.get(f"/api/v1/ops/ansible/job-execution/{task_id}/log/")
     log_text = clean_ansible_log(log_payload.get("data", "") if isinstance(log_payload, dict) else log_payload)
     batch_record["log_status"] = log_status
+    batch_record["log"] = log_text
     batch_record["log_excerpt"] = log_text[:2000]
     batch_record["results"] = [
         classify_probe_result(asset, section_for_asset(asset, log_text, len(batch))) for asset in batch
     ]
     return batch_record
+
+
+def run_single_asset_jobs(
+    results_prefix: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    timeout: int,
+    poll_interval: int,
+    runas: str,
+    wait_timeout: int,
+    concurrency: int,
+    no_proxy: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not assets:
+        return results_prefix, []
+    worker_count = max(1, min(concurrency, len(assets)))
+    indexed_results: list[dict[str, Any] | None] = [None] * len(assets)
+    batch_records: list[dict[str, Any]] = []
+
+    def run_one(item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        index, asset = item
+        worker_client = JumpServerClient(no_proxy=no_proxy)
+        record = run_batch(worker_client, [asset], index + 1, timeout, poll_interval, runas, wait_timeout)
+        result = (record.get("results") or [classify_probe_result(asset, "", timed_out=True, remark="单资产 Ops 任务无结果")])[0]
+        return index, result, record
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(run_one, item) for item in enumerate(assets)]
+        for future in as_completed(futures):
+            index, result, record = future.result()
+            indexed_results[index] = result
+            batch_records.append(record)
+
+    return results_prefix + [result for result in indexed_results if result is not None], batch_records
 
 
 def skipped_windows_result(asset: dict[str, Any]) -> dict[str, Any]:
@@ -801,6 +859,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
         f"- 活跃资产总数：{summary.get('total_assets', 0)}",
         f"- Linux / 非 Windows 参与探测：{summary.get('linux_assets', 0)}",
         f"- Windows 跳过：{summary.get('windows_assets', 0)}",
+        f"- 执行模式：{summary.get('execution_mode', '')}",
         f"- 重复资产 IP 数：{summary.get('duplicate_ip_count', 0)}",
         f"- 报告记录数：{len(results)}",
         "",
@@ -884,21 +943,35 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
     linux_assets = [asset for asset in assets if not is_windows_asset(asset)]
     results = [skipped_windows_result(asset) for asset in windows_assets]
     batch_records = []
-    linux_batches = chunks(linux_assets, args.batch_size)
-    for index, batch in enumerate(linux_batches, start=1):
-        batch_record = run_batch(client, batch, index, args.timeout, args.poll_interval, args.runas)
-        batch_records.append(batch_record)
-        results.extend(batch_record.get("results", []))
-        if args.batch_gap > 0 and index < len(linux_batches):
-            time.sleep(args.batch_gap)
+    if args.execution_mode == "single":
+        results, batch_records = run_single_asset_jobs(
+            results,
+            linux_assets,
+            args.timeout,
+            args.poll_interval,
+            args.runas,
+            args.wait_timeout,
+            args.concurrency,
+            args.no_proxy,
+        )
+    else:
+        linux_batches = chunks(linux_assets, args.batch_size)
+        for index, batch in enumerate(linux_batches, start=1):
+            batch_record = run_batch(client, batch, index, args.timeout, args.poll_interval, args.runas, args.wait_timeout)
+            batch_records.append(batch_record)
+            results.extend(batch_record.get("results", []))
+            if args.batch_gap > 0 and index < len(linux_batches):
+                time.sleep(args.batch_gap)
     duplicates = duplicate_asset_map(assets)
     apply_duplicate_asset_annotations(results, duplicates)
     summary = {
         "total_assets": len(assets),
         "linux_assets": len(linux_assets),
         "windows_assets": len(windows_assets),
+        "execution_mode": args.execution_mode,
         "batch_size": args.batch_size,
         "batch_count": len(batch_records),
+        "concurrency": args.concurrency if args.execution_mode == "single" else "",
         "duplicate_ip_count": len(duplicates),
     }
     paths = write_reports(
@@ -926,10 +999,13 @@ def main() -> None:
     list_assets.add_argument("--query", help="filter active assets by id, name, hostname, address, or ip")
 
     detect = sub.add_parser("detect")
+    detect.add_argument("--execution-mode", choices=("single", "batch"), default="single", help="single runs one Ops job per asset for accuracy; batch is faster but may miss per-host output")
     detect.add_argument("--batch-size", type=int, default=50)
-    detect.add_argument("--timeout", type=int, default=40)
+    detect.add_argument("--timeout", type=int, default=-1, help="JumpServer job timeout; -1 matches the Web console default")
+    detect.add_argument("--wait-timeout", type=int, default=60, help="local polling wait per Ops job")
     detect.add_argument("--poll-interval", type=int, default=3)
     detect.add_argument("--batch-gap", type=int, default=2)
+    detect.add_argument("--concurrency", type=int, default=12, help="concurrent single-asset Ops jobs when --execution-mode single")
     detect.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     detect.add_argument("--max-assets", type=int)
     detect.add_argument("--query", help="filter active assets by id, name, hostname, address, or ip")

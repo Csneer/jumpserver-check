@@ -9,9 +9,8 @@
 - 已实现 JumpServer AccessKey HMAC-SHA256 签名鉴权。
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个 CLI 子命令。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
-- 已通过 JumpServer Ops 作业批量下发只读 Shell 探测命令。
-- 已增强批量 Ops 日志分段匹配，兼容 JumpServer 将主机标签中的空格规范化为下划线等差异，减少无结果误判。
-- 已废弃单主机 Ops 复核链路；批量 Ops 无结果时直接归类，避免用同一条低收益链路放大耗时和噪声。
+- 已通过 JumpServer Ops 作业下发只读 Shell 探测命令；默认使用单资产并发 job，避免批量日志缺失污染结果。
+- 已保留批量模式用于快速粗扫，但准确报告应使用默认 `single` 模式。
 - 已支持提取主机所有全局 IPv4 地址，并默认排除 `172.*` Docker 常见地址段，避免多 IP 主机只按默认路由 IP 比对或容器网桥地址导致误判。
 - 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`permission_denied`、`no_account`、`parse_error`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
@@ -56,28 +55,30 @@ python scripts/jms_host_ip_check.py --no-proxy list-assets
 python scripts/jms_host_ip_check.py --no-proxy list-assets --query 192.0.2.82
 ```
 
-运行批量探测并生成 Markdown 报告：
+运行准确探测并生成 Markdown 报告：
 
 ```powershell
 python scripts/jms_host_ip_check.py --no-proxy detect `
-  --batch-size 50 `
-  --timeout 40 `
+  --execution-mode single `
+  --concurrency 12 `
+  --timeout -1 `
+  --wait-timeout 60 `
   --poll-interval 3 `
   --output-dir reports/yuque
 ```
 
-默认只跑批量 Ops 探测，批量超时默认 40 秒。批量无输出的主机不会再触发单主机 Ops 复核。
+默认使用 `single` 模式：每台资产单独创建 Ops job，payload 对齐 Web 控制台（`nodes: []`、`timeout: -1`），本地最多等待 60 秒。`batch` 模式可通过 `--execution-mode batch --batch-size 50` 启用，只适合快速粗扫。
 
 小批量验收：
 
 ```powershell
-python scripts/jms_host_ip_check.py --no-proxy detect --batch-size 1 --max-assets 1 --output-dir reports/yuque
+python scripts/jms_host_ip_check.py --no-proxy detect --max-assets 1 --output-dir reports/yuque
 ```
 
 指定单台主机验收：
 
 ```powershell
-python scripts/jms_host_ip_check.py --no-proxy detect --query 192.0.2.82 --batch-size 1 --output-dir reports/yuque
+python scripts/jms_host_ip_check.py --no-proxy detect --query 192.0.2.82 --output-dir reports/yuque
 ```
 
 ## 同步到知识库

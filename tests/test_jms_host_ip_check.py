@@ -83,11 +83,12 @@ def test_detection_command_is_read_only_and_has_markers():
 
 
 def test_build_ops_payload_uses_asset_ids_and_batches():
-    payload = check.build_ops_payload([{"id": "asset-1"}, {"id": "asset-2"}], batch_index=2, timeout=120)
+    payload = check.build_ops_payload([{"id": "asset-1"}, {"id": "asset-2"}], batch_index=2, timeout=-1)
 
     assert payload["module"] == "shell"
     assert payload["assets"] == ["asset-1", "asset-2"]
-    assert payload["timeout"] == 120
+    assert payload["nodes"] == []
+    assert payload["timeout"] == -1
     assert "read-only" in payload["comment"]
     assert payload["name"].endswith("batch-002")
 
