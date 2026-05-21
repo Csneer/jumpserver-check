@@ -348,6 +348,30 @@ def node_names(asset: dict[str, Any]) -> str:
     return ", ".join(names)
 
 
+def node_ids(asset: dict[str, Any]) -> list[str]:
+    nodes = asset.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    ids: list[str] = []
+    for node in nodes:
+        if isinstance(node, dict):
+            node_id = node.get("id")
+            if node_id:
+                ids.append(str(node_id))
+        elif node:
+            ids.append(str(node))
+    return ids
+
+
+def node_ids_for_assets(assets: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for asset in assets:
+        for node_id in node_ids(asset):
+            if node_id not in ids:
+                ids.append(node_id)
+    return ids
+
+
 def summarize_assets(assets: list[dict[str, Any]]) -> dict[str, Any]:
     platforms = Counter(platform_text(asset) or "unknown" for asset in assets)
     nodes = Counter()
@@ -409,7 +433,7 @@ def build_ops_payload(batch: list[dict[str, Any]], batch_index: int, timeout: in
         "module": "shell",
         "args": DETECTION_COMMAND,
         "assets": asset_ids,
-        "nodes": [],
+        "nodes": node_ids_for_assets(batch),
         "runas_policy": "skip",
         "runas": runas,
         "timeout": timeout,

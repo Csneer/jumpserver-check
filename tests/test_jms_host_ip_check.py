@@ -82,12 +82,19 @@ def test_detection_command_is_read_only_and_has_markers():
         assert forbidden not in command
 
 
-def test_build_ops_payload_uses_asset_ids_and_batches():
-    payload = check.build_ops_payload([{"id": "asset-1"}, {"id": "asset-2"}], batch_index=2, timeout=-1)
+def test_build_ops_payload_uses_asset_and_node_ids():
+    payload = check.build_ops_payload(
+        [
+            {"id": "asset-1", "nodes": [{"id": "node-1", "name": "pve"}]},
+            {"id": "asset-2", "nodes": [{"id": "node-1", "name": "pve"}, {"id": "node-2", "name": "ops"}]},
+        ],
+        batch_index=2,
+        timeout=-1,
+    )
 
     assert payload["module"] == "shell"
     assert payload["assets"] == ["asset-1", "asset-2"]
-    assert payload["nodes"] == []
+    assert payload["nodes"] == ["node-1", "node-2"]
     assert payload["timeout"] == -1
     assert "read-only" in payload["comment"]
     assert payload["name"].endswith("batch-002")
