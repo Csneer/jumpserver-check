@@ -13,8 +13,9 @@ import re
 import ssl
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 
@@ -686,37 +687,60 @@ def run_rechecks(
     poll_interval: int,
     runas: str,
     max_rechecks: int | None,
+    concurrency: int,
+    no_proxy: bool,
     batch_records: list[dict[str, Any]],
+    client_factory: Callable[[], Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if max_rechecks == 0:
         return results, {"recheck_count": 0, "recheck_recovered_count": 0}
-    updated: list[dict[str, Any]] = []
-    recheck_count = 0
-    recovered_count = 0
-    for result in results:
+    candidates: list[tuple[int, dict[str, Any], dict[str, Any], int]] = []
+    sequence = 0
+    for index, result in enumerate(results):
         asset_id = str(result.get("asset_id") or "")
         asset = asset_by_id.get(asset_id)
-        if not asset or not should_recheck_result(result) or (max_rechecks is not None and recheck_count >= max_rechecks):
-            updated.append(result)
+        if not asset or not should_recheck_result(result):
             continue
-        recheck_count += 1
-        batch_record = run_batch(client, [asset], 10000 + recheck_count, timeout, poll_interval, runas)
+        if max_rechecks is not None and sequence >= max_rechecks:
+            break
+        sequence += 1
+        candidates.append((index, result, asset, sequence))
+
+    if not candidates:
+        return results, {"recheck_count": 0, "recheck_recovered_count": 0}
+
+    worker_count = max(1, min(concurrency, len(candidates)))
+    updated = list(results)
+    recovered_count = 0
+    make_client = client_factory or (lambda: JumpServerClient(no_proxy=no_proxy))
+
+    def run_one(item: tuple[int, dict[str, Any], dict[str, Any], int]) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        index, result, asset, seq = item
+        recheck_client = make_client()
+        batch_record = run_batch(recheck_client, [asset], 10000 + seq, timeout, poll_interval, runas)
         batch_record["recheck_for"] = {
-            "asset_id": asset_id,
+            "asset_id": str(result.get("asset_id") or ""),
             "asset_name": result.get("asset_name"),
             "original_probe_status": result.get("probe_status"),
             "original_remark": result.get("remark"),
         }
-        batch_records.append(batch_record)
         recheck_results = batch_record.get("results") or []
         if recheck_results:
             merged = merge_recheck_result(result, recheck_results[0])
-            if result.get("connectivity") != "ok" and merged.get("connectivity") == "ok":
-                recovered_count += 1
-            updated.append(merged)
         else:
-            updated.append(result)
-    return updated, {"recheck_count": recheck_count, "recheck_recovered_count": recovered_count}
+            merged = result
+        return index, merged, batch_record
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(run_one, item) for item in candidates]
+        for future in as_completed(futures):
+            index, merged, batch_record = future.result()
+            batch_records.append(batch_record)
+            if results[index].get("connectivity") != "ok" and merged.get("connectivity") == "ok":
+                recovered_count += 1
+            updated[index] = merged
+
+    return updated, {"recheck_count": len(candidates), "recheck_recovered_count": recovered_count}
 
 
 def skipped_windows_result(asset: dict[str, Any]) -> dict[str, Any]:
@@ -938,6 +962,8 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             args.recheck_poll_interval,
             args.runas,
             args.max_rechecks,
+            args.recheck_concurrency,
+            args.no_proxy,
             batch_records,
         )
     duplicates = duplicate_asset_map(assets)
@@ -982,8 +1008,9 @@ def main() -> None:
     detect.add_argument("--batch-gap", type=int, default=2)
     detect.add_argument("--no-recheck", action="store_true", help="disable single-asset recheck for uncertain batch results")
     detect.add_argument("--max-rechecks", type=int, help="limit single-asset rechecks; default is unlimited")
-    detect.add_argument("--recheck-timeout", type=int, default=90)
+    detect.add_argument("--recheck-timeout", type=int, default=60)
     detect.add_argument("--recheck-poll-interval", type=int, default=2)
+    detect.add_argument("--recheck-concurrency", type=int, default=8, help="number of concurrent single-asset rechecks")
     detect.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     detect.add_argument("--max-assets", type=int)
     detect.add_argument("--query", help="filter active assets by id, name, hostname, address, or ip")

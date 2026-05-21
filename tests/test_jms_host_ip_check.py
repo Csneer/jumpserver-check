@@ -227,7 +227,10 @@ def test_single_asset_recheck_recovers_missing_batch_output(monkeypatch):
         poll_interval=2,
         runas="root",
         max_rechecks=None,
+        concurrency=4,
+        no_proxy=True,
         batch_records=batch_records,
+        client_factory=lambda: object(),
     )
 
     assert stats == {"recheck_count": 1, "recheck_recovered_count": 1}

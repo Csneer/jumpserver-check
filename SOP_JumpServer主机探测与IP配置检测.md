@@ -353,7 +353,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
   -> 若仍无输出或连接失败，保留异常状态，并记录 probe_source=batch+single_recheck
 ```
 
-复核成功的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果。
+复核默认使用有界并发，建议 `recheck_concurrency=8`，单主机复核超时建议 60s。复核成功的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果。
 
 ---
 
@@ -550,6 +550,8 @@ detection:
   task_timeout: 120       # 单批任务超时（秒）
   poll_interval: 3        # 轮询间隔（秒）
   max_concurrent_batches: 3   # 最大并发批次数
+  recheck_timeout: 60     # 单主机复核超时（秒）
+  recheck_concurrency: 8  # 单主机复核并发数
   consecutive_fail_threshold: 2  # 连续失败多少次触发处置
 
 report:

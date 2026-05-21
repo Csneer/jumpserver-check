@@ -63,11 +63,12 @@ python scripts/jms_host_ip_check.py --no-proxy detect `
   --batch-size 50 `
   --timeout 120 `
   --poll-interval 3 `
-  --recheck-timeout 90 `
+  --recheck-timeout 60 `
+  --recheck-concurrency 8 `
   --output-dir reports/yuque
 ```
 
-默认会对批量探测中的不确定结果执行单主机复核。若只想快速跑批量链路，可加 `--no-recheck`；若想先控制复核数量，可加 `--max-rechecks 20`。
+默认会对批量探测中的不确定结果执行单主机复核，复核默认 8 并发、60 秒超时。若只想快速跑批量链路，可加 `--no-recheck`；若想先控制复核数量，可加 `--max-rechecks 20`。
 
 小批量验收：
 
