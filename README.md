@@ -10,6 +10,7 @@
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个 CLI 子命令。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
 - 已通过 JumpServer Ops 作业批量下发只读 Shell 探测命令。
+- 已增强批量 Ops 日志分段匹配，兼容 JumpServer 将主机标签中的空格规范化为下划线等差异，减少不必要的单主机复核。
 - 已支持对 `unreachable`、`probe_timeout`、`parse_error` 等不确定结果执行单主机 Ops 复核，复核成功后会更新为真实可达状态。
 - 已支持提取主机所有全局 IPv4 地址，避免多 IP 主机只按默认路由 IP 比对导致误判。
 - 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`parse_error`、`skipped_windows`。

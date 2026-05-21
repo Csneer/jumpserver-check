@@ -165,6 +165,41 @@ def test_split_sections_supports_pipe_style_jumpserver_logs():
     assert "IP_TYPE=static" in check.section_for_asset({"name": "host-b"}, log, batch_size=2)
 
 
+def test_section_matching_normalizes_jumpserver_labels():
+    log = """
+192.168.101.121_netty_Redis_Cluster | CHANGED | rc=0 >>
+DETECT_START
+IP_TYPE=static
+IP_ADDR=192.168.101.121
+IP_ADDRS=192.168.101.121,172.17.0.1
+IF_NAME=ens18
+DETECT_END
+"""
+    asset = {"name": "192.168.101.121_netty Redis Cluster", "address": "192.168.101.121"}
+
+    section = check.section_for_asset(asset, log, batch_size=50)
+
+    assert "IP_TYPE=static" in section
+    assert "IF_NAME=ens18" in section
+
+
+def test_section_matching_avoids_ambiguous_normalized_labels():
+    log = """
+host_a | CHANGED | rc=0 >>
+DETECT_START
+IP_TYPE=static
+IP_ADDR=192.0.2.1
+DETECT_END
+host-a | CHANGED | rc=0 >>
+DETECT_START
+IP_TYPE=dhcp
+IP_ADDR=192.0.2.2
+DETECT_END
+"""
+
+    assert check.section_for_asset({"name": "host a"}, log, batch_size=2) == ""
+
+
 def test_single_asset_recheck_recovers_missing_batch_output(monkeypatch):
     asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
     original = check.classify_probe_result(asset, "")

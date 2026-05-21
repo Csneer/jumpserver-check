@@ -454,13 +454,47 @@ def split_ip_values(value: str) -> list[str]:
 
 
 def host_labels(asset: dict[str, Any]) -> set[str]:
-    labels = {
+    labels = set()
+    for value in (
         str(asset.get("name") or ""),
         str(asset.get("hostname") or ""),
         str(asset.get("address") or ""),
         str(asset.get("ip") or ""),
-    }
+    ):
+        if value:
+            labels.add(value)
+    name = asset_name(asset)
+    ip = asset_ip(asset)
+    if name and ip and name.startswith(f"{ip}_"):
+        labels.add(name.removeprefix(f"{ip}_"))
+    if name:
+        match = re.match(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})[-_](.+)$", name)
+        if match:
+            labels.add(".".join(match.groups()[:4]))
+            labels.add(f"{'.'.join(match.groups()[:4])}_{match.group(5)}")
     return {label for label in labels if label}
+
+
+def normalize_host_label(value: str) -> str:
+    text = clean_ansible_log(value).strip().lower()
+    text = re.sub(r"\s+", "_", text)
+    text = re.sub(r"[^a-z0-9_.\-\u4e00-\u9fff]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_.-")
+    return text
+
+
+def section_lookup_keys(label: str) -> set[str]:
+    normalized = normalize_host_label(label)
+    keys = {normalized}
+    if normalized:
+        keys.add(normalized.replace("-", "_"))
+        keys.add(normalized.replace("_", "-"))
+        ip_match = re.search(r"\d{1,3}(?:[._-]\d{1,3}){3}", normalized)
+        if ip_match:
+            ip_key = ip_match.group(0).replace("_", ".").replace("-", ".")
+            keys.add(ip_key)
+            keys.add(normalized.replace(ip_match.group(0), ip_key))
+    return {key for key in keys if key}
 
 
 def split_ansible_host_sections(log_text: str) -> dict[str, str]:
@@ -479,11 +513,25 @@ def split_ansible_host_sections(log_text: str) -> dict[str, str]:
     return sections
 
 
+def indexed_sections(sections: dict[str, str]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for label in sections:
+        for key in section_lookup_keys(label):
+            index.setdefault(key, []).append(label)
+    return index
+
+
 def section_for_asset(asset: dict[str, Any], log_text: str, batch_size: int) -> str:
     sections = split_ansible_host_sections(log_text)
     for label in host_labels(asset):
         if label in sections:
             return sections[label]
+    index = indexed_sections(sections)
+    for label in host_labels(asset):
+        for key in section_lookup_keys(label):
+            labels = index.get(key) or []
+            if len(labels) == 1:
+                return sections[labels[0]]
     if batch_size == 1:
         return clean_ansible_log(log_text)
     return ""
