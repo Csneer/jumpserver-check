@@ -1,0 +1,13 @@
+[project]
+name = "jumpserver-check"
+version = "0.1.0"
+description = "Read-only JumpServer host connectivity and IP configuration detector"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
