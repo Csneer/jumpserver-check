@@ -189,6 +189,25 @@ Task ops.tasks.run_ops_job_execution[abc] succeeded in 7.4s: None
     assert result["remark"] == "JumpServer Ops 返回连接失败"
 
 
+def test_parse_probe_marker_wins_over_task_none_footer():
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    log = """
+host-a | CHANGED | rc=0 >>
+DETECT_START
+IP_TYPE=static
+IP_ADDR=192.0.2.10
+IP_ADDRS=192.0.2.10
+IF_NAME=ens18
+DETECT_END
+Task ops.tasks.run_ops_job_execution[abc] succeeded in 7.4s: None
+"""
+
+    result = check.classify_probe_result(asset, log)
+
+    assert result["probe_status"] == "ok_static"
+    assert result["actual_ips"] == "192.0.2.10"
+
+
 def test_split_sections_and_select_asset_section():
     log = """
 changed: [host-a] => {"stdout": "DETECT_START\\nIP_TYPE=static\\nIP_ADDR=198.51.100.1\\nDETECT_END"}
@@ -223,6 +242,24 @@ DETECT_END
 
     assert "IP_TYPE=static" in section
     assert "IF_NAME=ens18" in section
+
+
+def test_single_asset_section_uses_only_log_section_when_label_differs():
+    log = """
+192.168.101.121_netty_Redis_Cluster | CHANGED | rc=0 >>
+DETECT_START
+IP_TYPE=static
+IP_ADDR=192.168.101.121
+IP_ADDRS=192.168.101.121
+IF_NAME=ens18
+DETECT_END
+"""
+    asset = {"name": "192.168.101.121_netty Redis Cluster", "address": "192.168.101.121"}
+
+    result = check.classify_probe_result(asset, check.section_for_asset(asset, log, batch_size=1))
+
+    assert result["probe_status"] == "ok_static"
+    assert result["actual_ips"] == "192.168.101.121"
 
 
 def test_section_matching_avoids_ambiguous_normalized_labels():

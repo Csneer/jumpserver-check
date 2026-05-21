@@ -523,6 +523,9 @@ def indexed_sections(sections: dict[str, str]) -> dict[str, list[str]]:
 
 def section_for_asset(asset: dict[str, Any], log_text: str, batch_size: int) -> str:
     sections = split_ansible_host_sections(log_text)
+    cleaned = clean_ansible_log(log_text)
+    if batch_size == 1:
+        return next(iter(sections.values()), cleaned) if sections else cleaned
     for label in host_labels(asset):
         if label in sections:
             return sections[label]
@@ -532,8 +535,6 @@ def section_for_asset(asset: dict[str, Any], log_text: str, batch_size: int) -> 
             labels = index.get(key) or []
             if len(labels) == 1:
                 return sections[labels[0]]
-    if batch_size == 1:
-        return clean_ansible_log(log_text)
     return ""
 
 
@@ -582,12 +583,12 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
     if "unreachable" in lowered or "failed to connect" in lowered or "permission denied" in lowered:
         base["remark"] = remark or "JumpServer Ops 返回连接失败"
         return base
-    if re.search(r"task\s+ops\.tasks\..*succeeded\s+in\s+\d+(?:\.\d+)?s:\s+none", lowered, flags=re.S):
-        base["probe_status"] = "ops_no_output"
-        base["remark"] = remark or "Ops 任务成功但未返回主机输出"
-        return base
     values = parse_kv_block(log_segment)
     if values is None:
+        if re.search(r"task\s+ops\.tasks\..*succeeded\s+in\s+\d+(?:\.\d+)?s:\s+none", lowered, flags=re.S):
+            base["probe_status"] = "ops_no_output"
+            base["remark"] = remark or "Ops 任务成功但未返回主机输出"
+            return base
         base["connectivity"] = "ok"
         base["probe_status"] = "parse_error"
         base["remark"] = remark or "未找到 DETECT_START/DETECT_END 输出块"
