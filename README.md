@@ -10,6 +10,7 @@
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个 CLI 子命令。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
 - 已通过 JumpServer Ops 作业批量下发只读 Shell 探测命令。
+- 已支持对 `unreachable`、`probe_timeout`、`parse_error` 等不确定结果执行单主机 Ops 复核，复核成功后会更新为真实可达状态。
 - 已支持提取主机所有全局 IPv4 地址，避免多 IP 主机只按默认路由 IP 比对导致误判。
 - 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`parse_error`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
@@ -61,8 +62,11 @@ python scripts/jms_host_ip_check.py --no-proxy detect `
   --batch-size 50 `
   --timeout 120 `
   --poll-interval 3 `
+  --recheck-timeout 90 `
   --output-dir reports/yuque
 ```
+
+默认会对批量探测中的不确定结果执行单主机复核。若只想快速跑批量链路，可加 `--no-recheck`；若想先控制复核数量，可加 `--max-rechecks 20`。
 
 小批量验收：
 
@@ -134,6 +138,8 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 - `probe_timeout`：批次任务创建失败或轮询超时。
 - `parse_error`：主机有输出，但缺少固定探测 marker。
 - `skipped_windows`：Windows 资产按 SOP 跳过。
+
+`探测来源` 字段用于区分结果来源：`batch` 表示批量 Ops 探测；`single_recheck` 表示批量结果不确定但单主机复核成功；`batch+single_recheck` 表示单主机复核后仍未恢复。
 
 ## 测试
 

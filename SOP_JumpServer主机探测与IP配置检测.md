@@ -55,6 +55,8 @@
   -> 轮询任务状态
   -> 获取执行日志
   -> 解析并分类
+  -> 对不确定结果执行单主机复核
+  -> 合并复核结果
   -> 生成 Markdown / JSON 报告
 ```
 
@@ -119,6 +121,12 @@ SUCCESS → 按主机解析输出
     ├─ IP_TYPE=dhcp             → 动态IP告警
     ├─ IP_TYPE=static           → 正常
     └─ IP_TYPE=unknown          → 无法判断，人工核查
+    │
+    ▼
+对 unreachable / probe_timeout / parse_error 执行单主机复核
+    │
+    ├─ 复核拿到 DETECT_START → 更新为真实 reachable 分类
+    └─ 复核仍失败 → 保留不可达/异常状态并记录复核来源
     │
     ▼
 连续 2 次不可达 → 触发禁用 / 通知
@@ -326,6 +334,27 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 - 同时处理的批次数建议 ≤ 3，避免 JumpServer Celery 队列积压。
 - 批次间建议间隔 2s 再下发下一批。
 
+### 7.6 单主机复核链路
+
+批量 Ops 日志可能出现以下误判来源：
+
+- 批次日志没有返回某台主机分段，但交互连接实际可达。
+- Ansible/JMS 日志分段标签与资产名、主机名、IP 不一致，导致解析器无法定位主机输出。
+- 批量任务中部分主机输出被截断或延迟，但单主机作业可正常返回。
+
+因此批量探测完成后，对 `unreachable`、`probe_timeout`、`parse_error` 执行第二阶段单主机复核：
+
+```text
+批量结果为不确定状态
+  -> 使用同一个资产 id 单独创建 Ops 作业
+  -> 轮询单主机任务
+  -> 获取单主机日志
+  -> 若出现 DETECT_START/DETECT_END，重新分类为 ok_static / warn_dhcp / manual_check / ip_mismatch
+  -> 若仍无输出或连接失败，保留异常状态，并记录 probe_source=batch+single_recheck
+```
+
+复核成功的记录会标记 `probe_source=single_recheck`，并保留 `original_probe_status` 与 `original_remark`，便于追溯批量链路原始结果。
+
 ---
 
 ## 8. 阶段五：解析输出与分类
@@ -344,7 +373,7 @@ GET /api/v1/ops/ansible/job-execution/{task_id}/log/
 
 **步骤 1**：判断是否有有效输出
 
-- 无输出 / 命令 exit code 非 0 → 归类为 `unreachable`（主机不可达）
+- 无输出 / 命令 exit code 非 0 → 先归类为 `unreachable`，再进入单主机复核队列，不直接认定主机最终不可达。
 
 **步骤 2**：从输出中提取 `DETECT_START` 到 `DETECT_END` 之间的内容
 
@@ -436,6 +465,9 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `ip_type` | static / dhcp / unknown |
 | `connectivity` | ok / unreachable |
 | `probe_status` | ok_static / warn_dhcp / unreachable / probe_timeout 等 |
+| `probe_source` | batch / single_recheck / batch+single_recheck / skipped |
+| `original_probe_status` | 单主机复核前的批量探测状态 |
+| `original_remark` | 单主机复核前的批量探测备注 |
 | `node` | 所属节点/分组 |
 | `remark` | 备注（如：连续 N 次失败） |
 
