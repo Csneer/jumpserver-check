@@ -100,6 +100,55 @@ def test_build_ops_payload_uses_asset_and_node_ids():
     assert payload["name"].endswith("batch-002")
 
 
+def test_fetch_full_job_log_follows_marks():
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, path, params=None):
+            self.calls.append((path, params))
+            if params is None:
+                return 200, {"data": "one\\n", "end": False, "mark": "m1"}
+            return 200, {"data": "two\\n", "end": True, "mark": "m2"}
+
+    client = Client()
+    status, log, pages = check.fetch_full_job_log(client, "task-1")
+
+    assert status == 200
+    assert log == "one\ntwo\n"
+    assert client.calls == [
+        ("/api/v1/ops/ansible/job-execution/task-1/log/", None),
+        ("/api/v1/ops/ansible/job-execution/task-1/log/", {"mark": "m1"}),
+    ]
+    assert pages[-1]["end"] is True
+
+
+def test_chunks_zero_means_all_in_one():
+    items = [{"id": "asset-1"}, {"id": "asset-2"}]
+
+    assert check.chunks(items, 0) == [items]
+
+
+def test_chunks_by_primary_node_groups_assets():
+    assets = [
+        {"id": "asset-1", "nodes": [{"id": "node-a"}]},
+        {"id": "asset-2", "nodes": [{"id": "node-b"}]},
+        {"id": "asset-3", "nodes": [{"id": "node-a"}]},
+    ]
+
+    batches = check.chunks_by_primary_node(assets)
+
+    assert [[asset["id"] for asset in batch] for batch in batches] == [["asset-1", "asset-3"], ["asset-2"]]
+
+
+def test_permission_denied_result_marks_preflight_source():
+    result = check.permission_denied_result({"id": "asset-1", "name": "host-a", "address": "192.0.2.10"})
+
+    assert result["probe_status"] == "permission_denied"
+    assert result["probe_source"] == "preflight"
+    assert "未授权" in result["remark"]
+
+
 def test_parse_probe_static_success():
     asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
     segment = """
@@ -179,6 +228,22 @@ def test_parse_probe_ops_failure_statuses():
     assert no_account["probe_status"] == "no_account"
     assert no_output["probe_status"] == "ops_no_output"
     assert module_error["probe_status"] == "ops_module_error"
+
+
+def test_summary_message_for_asset_matches_normalized_labels():
+    asset = {"name": "192.168.101.121_netty Redis Cluster", "address": "192.168.101.121"}
+    summary = {
+        "dark": {
+            "192.168.101.121_netty_Redis_Cluster": "shell: Failed to connect to the host via ssh: No route to host"
+        }
+    }
+
+    message = check.summary_message_for_asset(asset, summary)
+    result = check.classify_probe_result(asset, message, remark=message)
+
+    assert "No route" in message
+    assert result["probe_status"] == "unreachable"
+    assert "No route" in result["remark"]
 
 
 def test_parse_probe_host_unreachable_wins_over_task_none_footer():

@@ -283,7 +283,7 @@ Content-Type: application/json
   "module": "shell",
   "args": "<复合探测命令>",
   "assets": ["asset_id_1"],
-  "nodes": [],
+  "nodes": ["node_id_1"],
   "runas_policy": "skip",
   "runas": "root",
   "timeout": -1,
@@ -321,7 +321,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 ### 7.4 轮询超时处理
 
-- 超时阈值：`wait_timeout`（建议 60s）
+- 超时阈值：`wait_timeout`（建议 1200s，全量批量探测按实际执行约 10 分钟预留）
 - 超过阈值后，无论状态如何，停止等待。
 - 将本批所有主机记录为 `probe_timeout`，在报告中单独标记。
 - **不主动取消 Task**，避免影响 JumpServer 队列状态。
@@ -333,15 +333,11 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 ### 7.6 执行模式
 
-准确报告使用 `single` 模式：每台 Linux 资产单独创建一个 Ops job，有界并发执行。这样每个结果都有独立的 `task_id`、日志和 job summary，避免批量日志中某台主机输出缺失时污染最终结论。
+准确报告默认使用 `batch --batch-size 0`：所有当前账号已授权、非 Windows 资产一次提交 Ops job，payload 同时携带 `assets` 和 `nodes`，对齐 JumpServer Web 控制台作业链路。
 
-`batch` 模式仅用于快速粗扫。批量 Ops 日志可能出现以下无结果来源：
+执行前先从官方资产接口 `/api/v1/assets/assets/` 拉取全量活跃资产作为报告总口径，再从 `/api/v1/perms/users/self/assets/` 拉取当前账号可执行资产。全量资产中未授权的部分不提交 Ops，直接在报告中标记为 `permission_denied`。
 
-- 批次日志没有返回某台主机分段，但交互连接实际可达。
-- Ansible/JMS 日志分段标签与资产名、主机名、IP 不一致，导致解析器无法定位主机输出。
-- JumpServer Ops API 返回成功但日志为 `None`，实际交互连接仍可能可达。
-
-批量模式产生的无输出结果不应作为绝对不可达结论。需要准确结果时必须使用 `single` 模式重新执行。
+轮询默认 30 秒一次。任务完成后优先读取 task summary 中的 `dark`、`failures`、`excludes`，再结合日志分段解析每台主机的 `DETECT_START/DETECT_END` 输出，避免明确的连接失败、无账号或模块失败被误判为无输出。
 
 ---
 
@@ -538,11 +534,11 @@ jumpserver:
   system_user_id: "xxxx-xxxx-xxxx-xxxx"
 
 detection:
-  execution_mode: single  # single 准确模式；batch 快速粗扫
-  concurrency: 12         # 单资产 job 并发数
+  execution_mode: batch   # 默认全量一次批量提交
+  batch_size: 0           # 0 表示当前账号已授权资产 all-in-one
   task_timeout: -1        # JumpServer job timeout，-1 对齐 Web 控制台
-  wait_timeout: 60        # 本地轮询等待超时（秒）
-  poll_interval: 3        # 轮询间隔（秒）
+  wait_timeout: 1200      # 本地轮询等待超时（秒）
+  poll_interval: 30       # 轮询间隔（秒）
   max_concurrent_batches: 3   # 最大并发批次数
   consecutive_fail_threshold: 2  # 连续失败多少次触发处置
 

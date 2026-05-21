@@ -9,8 +9,8 @@
 - 已实现 JumpServer AccessKey HMAC-SHA256 签名鉴权。
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个 CLI 子命令。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
-- 已通过 JumpServer Ops 作业下发只读 Shell 探测命令；默认使用单资产并发 job，避免批量日志缺失污染结果。
-- 已保留批量模式用于快速粗扫，但准确报告应使用默认 `single` 模式。
+- 已通过 JumpServer Ops 作业下发只读 Shell 探测命令；默认使用全量一次批量 job，payload 携带资产 ID 和节点 ID，对齐 Web 控制台链路。
+- 已在执行前读取当前账号授权资产，未授权资产不提交 Ops，报告中标记为 `permission_denied`。
 - 已支持提取主机所有全局 IPv4 地址，并默认排除 `172.*` Docker 常见地址段，避免多 IP 主机只按默认路由 IP 比对或容器网桥地址导致误判。
 - 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`permission_denied`、`no_account`、`parse_error`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
@@ -59,15 +59,15 @@ python scripts/jms_host_ip_check.py --no-proxy list-assets --query 192.0.2.82
 
 ```powershell
 python scripts/jms_host_ip_check.py --no-proxy detect `
-  --execution-mode single `
-  --concurrency 12 `
+  --execution-mode batch `
+  --batch-size 0 `
   --timeout -1 `
-  --wait-timeout 60 `
-  --poll-interval 3 `
+  --wait-timeout 1200 `
+  --poll-interval 30 `
   --output-dir reports/yuque
 ```
 
-默认使用 `single` 模式：每台资产单独创建 Ops job，payload 对齐 Web 控制台（`nodes: []`、`timeout: -1`），本地最多等待 60 秒。`batch` 模式可通过 `--execution-mode batch --batch-size 50` 启用，只适合快速粗扫。
+默认使用 `batch --batch-size 0`：所有当前账号有权限的非 Windows 资产一次提交 Ops job，payload 对齐 Web 控制台（`assets` + `nodes`、`timeout: -1`），本地默认 30 秒轮询一次，最多等待 1200 秒。
 
 小批量验收：
 

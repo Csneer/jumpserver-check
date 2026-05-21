@@ -291,6 +291,22 @@ def fetch_active_assets(client: JumpServerClient, page_size: int = DEFAULT_PAGE_
     return assets
 
 
+def fetch_authorized_assets(client: JumpServerClient, page_size: int = DEFAULT_PAGE_SIZE) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        params = {"limit": page_size, "offset": offset}
+        status, payload = client.get("/api/v1/perms/users/self/assets/", params=params)
+        if not (200 <= status < 300):
+            raise SystemExit(f"Failed to fetch authorized assets: HTTP {status} {compact(payload)}")
+        items = items_from_payload(payload)
+        assets.extend(items)
+        if not isinstance(payload, dict) or not payload.get("next") or not items:
+            break
+        offset += page_size
+    return assets
+
+
 def asset_matches_query(asset: dict[str, Any], query: str) -> bool:
     needle = query.strip().lower()
     if not needle:
@@ -309,6 +325,10 @@ def filter_assets_by_query(assets: list[dict[str, Any]], query: str | None) -> l
     if not query:
         return assets
     return [asset for asset in assets if asset_matches_query(asset, query)]
+
+
+def asset_ids(assets: list[dict[str, Any]]) -> set[str]:
+    return {str(asset["id"]) for asset in assets if asset.get("id")}
 
 
 def platform_text(asset: dict[str, Any]) -> str:
@@ -372,6 +392,32 @@ def node_ids_for_assets(assets: list[dict[str, Any]]) -> list[str]:
     return ids
 
 
+def primary_node_key(asset: dict[str, Any]) -> str:
+    ids = node_ids(asset)
+    if ids:
+        return ids[0]
+    return "__no_node__"
+
+
+def chunks_by_primary_node(assets: list[dict[str, Any]], max_size: int = 0) -> list[list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for asset in assets:
+        key = primary_node_key(asset)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(asset)
+    batches: list[list[dict[str, Any]]] = []
+    for key in order:
+        group = grouped[key]
+        if max_size and max_size > 0:
+            batches.extend(chunks(group, max_size))
+        else:
+            batches.append(group)
+    return batches
+
+
 def summarize_assets(assets: list[dict[str, Any]]) -> dict[str, Any]:
     platforms = Counter(platform_text(asset) or "unknown" for asset in assets)
     nodes = Counter()
@@ -417,9 +463,35 @@ def apply_duplicate_asset_annotations(results: list[dict[str, Any]], duplicates:
 
 
 def chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    if size <= 0:
+    if size == 0:
+        return [items] if items else []
+    if size < 0:
         raise ValueError("batch size must be greater than 0")
     return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreachable", remark: str = "", source: str = "batch") -> dict[str, Any]:
+    return {
+        "asset_id": asset.get("id"),
+        "asset_name": asset_name(asset),
+        "asset_ip": asset_ip(asset),
+        "actual_ip": "",
+        "actual_ips": "",
+        "ip_match": "",
+        "if_name": "",
+        "ip_type": "",
+        "connectivity": connectivity,
+        "probe_status": status,
+        "probe_source": source,
+        "original_probe_status": "",
+        "original_remark": "",
+        "node": node_names(asset),
+        "remark": remark,
+    }
+
+
+def permission_denied_result(asset: dict[str, Any], remark: str = "当前账号未授权该资产，未提交 Ops 执行") -> dict[str, Any]:
+    return base_result(asset, "permission_denied", remark=remark, source="preflight")
 
 
 def build_ops_payload(batch: list[dict[str, Any]], batch_index: int, timeout: int, runas: str = "root") -> dict[str, Any]:
@@ -451,6 +523,31 @@ def clean_ansible_log(text: Any) -> str:
         return json.dumps(text, ensure_ascii=False)
     normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\x00", "")
     return re.sub(r"\x1b\[[0-9;]*m", "", normalized)
+
+
+def fetch_full_job_log(client: JumpServerClient, task_id: str, max_pages: int = 200) -> tuple[int, str, list[dict[str, Any]]]:
+    chunks_text: list[str] = []
+    pages: list[dict[str, Any]] = []
+    mark = None
+    status = 0
+    for _ in range(max_pages):
+        params = {"mark": mark} if mark else None
+        status, payload = client.get(f"/api/v1/ops/ansible/job-execution/{task_id}/log/", params=params)
+        if not isinstance(payload, dict):
+            chunks_text.append(clean_ansible_log(payload))
+            pages.append({"status": status, "end": True, "mark": mark, "length": len(chunks_text[-1])})
+            break
+        data = payload.get("data", "")
+        text = clean_ansible_log(data)
+        chunks_text.append(text)
+        pages.append({"status": status, "end": payload.get("end"), "mark": payload.get("mark"), "length": len(text)})
+        if payload.get("end"):
+            break
+        next_mark = payload.get("mark")
+        if not next_mark or next_mark == mark:
+            break
+        mark = str(next_mark)
+    return status, "".join(chunks_text), pages
 
 
 def parse_kv_block(text: str) -> dict[str, str] | None:
@@ -564,24 +661,39 @@ def section_for_asset(asset: dict[str, Any], log_text: str, batch_size: int) -> 
     return ""
 
 
+def summary_failure_messages(summary: Any) -> dict[str, str]:
+    if not isinstance(summary, dict):
+        return {}
+    messages: dict[str, str] = {}
+    for key in ("dark", "failures", "excludes"):
+        value = summary.get(key)
+        if isinstance(value, dict):
+            for label, message in value.items():
+                messages[str(label)] = str(message)
+    return messages
+
+
+def summary_message_for_asset(asset: dict[str, Any], summary: Any) -> str:
+    messages = summary_failure_messages(summary)
+    if not messages:
+        return ""
+    for label in host_labels(asset):
+        if label in messages:
+            return messages[label]
+    index: dict[str, list[str]] = {}
+    for label in messages:
+        for key in section_lookup_keys(label):
+            index.setdefault(key, []).append(label)
+    for label in host_labels(asset):
+        for key in section_lookup_keys(label):
+            labels = index.get(key) or []
+            if len(labels) == 1:
+                return messages[labels[0]]
+    return ""
+
+
 def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bool = False, remark: str = "") -> dict[str, Any]:
-    base = {
-        "asset_id": asset.get("id"),
-        "asset_name": asset_name(asset),
-        "asset_ip": asset_ip(asset),
-        "actual_ip": "",
-        "actual_ips": "",
-        "ip_match": "",
-        "if_name": "",
-        "ip_type": "",
-        "connectivity": "unreachable",
-        "probe_status": "probe_timeout" if timed_out else "unreachable",
-        "probe_source": "batch",
-        "original_probe_status": "",
-        "original_remark": "",
-        "node": node_names(asset),
-        "remark": remark,
-    }
+    base = base_result(asset, "probe_timeout" if timed_out else "unreachable", remark=remark)
     if timed_out:
         return base
     if not log_segment:
@@ -692,15 +804,17 @@ def run_batch(
                 "summary": task.get("summary"),
             }
         )
-        if task.get("is_finished"):
+        if task.get("is_finished") or str(task.get("status") or "").lower() in {"success", "failed"}:
             break
         time.sleep(poll_interval)
 
-    timed_out = not task.get("is_finished")
+    finished = bool(task.get("is_finished")) or str(task.get("status") or "").lower() in {"success", "failed"}
+    timed_out = not finished
     batch_record["task"] = {
         "status": task.get("status"),
         "is_finished": task.get("is_finished"),
         "is_success": task.get("is_success"),
+        "time_cost": task.get("time_cost"),
         "job_id": task.get("job_id"),
         "summary": task.get("summary"),
     }
@@ -715,14 +829,19 @@ def run_batch(
         ]
         return batch_record
 
-    log_status, log_payload = client.get(f"/api/v1/ops/ansible/job-execution/{task_id}/log/")
-    log_text = clean_ansible_log(log_payload.get("data", "") if isinstance(log_payload, dict) else log_payload)
+    log_status, log_text, log_pages = fetch_full_job_log(client, task_id)
     batch_record["log_status"] = log_status
+    batch_record["log_pages"] = log_pages
     batch_record["log"] = log_text
     batch_record["log_excerpt"] = log_text[:2000]
-    batch_record["results"] = [
-        classify_probe_result(asset, section_for_asset(asset, log_text, len(batch))) for asset in batch
-    ]
+    results = []
+    for asset in batch:
+        segment = section_for_asset(asset, log_text, len(batch))
+        summary_message = summary_message_for_asset(asset, task.get("summary"))
+        if summary_message:
+            segment = f"{summary_message}\n{segment}".strip()
+        results.append(classify_probe_result(asset, segment, remark=summary_message))
+    batch_record["results"] = results
     return batch_record
 
 
@@ -963,9 +1082,14 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         assets = assets[: args.max_assets]
     if not assets:
         raise SystemExit(f"No active asset matched query: {args.query}")
+    authorized_assets = fetch_authorized_assets(client, page_size=args.page_size)
+    authorized = asset_ids(authorized_assets)
+    unauthorized_assets = [asset for asset in assets if asset.get("id") and str(asset["id"]) not in authorized]
+    executable_assets = [asset for asset in assets if not asset.get("id") or str(asset["id"]) in authorized]
     windows_assets = [asset for asset in assets if is_windows_asset(asset)]
-    linux_assets = [asset for asset in assets if not is_windows_asset(asset)]
+    linux_assets = [asset for asset in executable_assets if not is_windows_asset(asset)]
     results = [skipped_windows_result(asset) for asset in windows_assets]
+    results.extend(permission_denied_result(asset) for asset in unauthorized_assets if not is_windows_asset(asset))
     batch_records = []
     if args.execution_mode == "single":
         results, batch_records = run_single_asset_jobs(
@@ -979,7 +1103,10 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             args.no_proxy,
         )
     else:
-        linux_batches = chunks(linux_assets, args.batch_size)
+        if args.execution_mode == "node-batch":
+            linux_batches = chunks_by_primary_node(linux_assets, args.batch_size)
+        else:
+            linux_batches = chunks(linux_assets, args.batch_size)
         for index, batch in enumerate(linux_batches, start=1):
             batch_record = run_batch(client, batch, index, args.timeout, args.poll_interval, args.runas, args.wait_timeout)
             batch_records.append(batch_record)
@@ -992,6 +1119,8 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         "total_assets": len(assets),
         "linux_assets": len(linux_assets),
         "windows_assets": len(windows_assets),
+        "authorized_assets": len(executable_assets),
+        "unauthorized_assets": len(unauthorized_assets),
         "execution_mode": args.execution_mode,
         "batch_size": args.batch_size,
         "batch_count": len(batch_records),
@@ -1023,11 +1152,16 @@ def main() -> None:
     list_assets.add_argument("--query", help="filter active assets by id, name, hostname, address, or ip")
 
     detect = sub.add_parser("detect")
-    detect.add_argument("--execution-mode", choices=("single", "batch"), default="single", help="single runs one Ops job per asset for accuracy; batch is faster but may miss per-host output")
-    detect.add_argument("--batch-size", type=int, default=50)
+    detect.add_argument(
+        "--execution-mode",
+        choices=("node-batch", "batch", "single"),
+        default="batch",
+        help="node-batch matches the Web console node-scoped bulk execution; batch can use --batch-size 0 for all-in-one; single runs one Ops job per asset",
+    )
+    detect.add_argument("--batch-size", type=int, default=0, help="0 means all assets in one batch, or one batch per node in node-batch mode")
     detect.add_argument("--timeout", type=int, default=-1, help="JumpServer job timeout; -1 matches the Web console default")
-    detect.add_argument("--wait-timeout", type=int, default=60, help="local polling wait per Ops job")
-    detect.add_argument("--poll-interval", type=int, default=3)
+    detect.add_argument("--wait-timeout", type=int, default=1200, help="local polling wait per Ops job")
+    detect.add_argument("--poll-interval", type=int, default=30)
     detect.add_argument("--batch-gap", type=int, default=2)
     detect.add_argument("--concurrency", type=int, default=12, help="concurrent single-asset Ops jobs when --execution-mode single")
     detect.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
