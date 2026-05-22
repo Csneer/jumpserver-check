@@ -80,23 +80,38 @@ def run_detect_subprocess(args: argparse.Namespace, timeout_seconds: int) -> dic
     if args.max_assets is not None:
         command.extend(["--max-assets", str(args.max_assets)])
 
+    print(f"[weekly-check] start detect subprocess, timeout={timeout_seconds}s, poll_interval={args.poll_interval}s", flush=True)
+    started = time.time()
+    process = subprocess.Popen(
+        command,
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"探测流程超过 {timeout_seconds}s 未完成") from exc
-    if completed.returncode != 0:
-        raise RuntimeError(f"探测命令失败：{completed.stderr.strip() or completed.stdout.strip()}")
+        while True:
+            returncode = process.poll()
+            if returncode is not None:
+                break
+            elapsed = time.time() - started
+            if elapsed > timeout_seconds:
+                process.kill()
+                process.communicate()
+                raise TimeoutError(f"探测流程超过 {timeout_seconds}s 未完成")
+            print(f"[weekly-check] detect still running, elapsed={elapsed:.0f}s/{timeout_seconds}s", flush=True)
+            time.sleep(min(max(args.poll_interval, 1), 30))
+        stdout, stderr = process.communicate()
+    except KeyboardInterrupt:
+        process.kill()
+        process.communicate()
+        raise
+    if process.returncode != 0:
+        raise RuntimeError(f"探测命令失败：{stderr.strip() or stdout.strip()}")
     try:
-        return json.loads(completed.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"探测命令输出不是 JSON：{completed.stdout[-1000:]}") from exc
+        raise RuntimeError(f"探测命令输出不是 JSON：{stdout[-1000:]}") from exc
 
 
 def write_workflow_record(record: dict[str, Any], output_dir: Path) -> Path:
@@ -161,6 +176,9 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     except TimeoutError as exc:
         status = "timeout"
         error_message = str(exc)
+    except KeyboardInterrupt:
+        status = "failed"
+        error_message = "用户中断执行"
     except Exception as exc:
         status = "failed"
         error_message = str(exc)

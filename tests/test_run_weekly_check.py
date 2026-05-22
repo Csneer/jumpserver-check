@@ -1,4 +1,5 @@
 import argparse
+import time
 
 from scripts import run_weekly_check as weekly
 
@@ -120,3 +121,35 @@ def test_run_workflow_preflight_failure_does_not_detect(monkeypatch, tmp_path):
     assert record["status"] == "failed"
     assert "前置配置检查失败" in record["error_message"]
     assert calls[0]["status"] == "failed"
+
+
+def test_run_detect_subprocess_timeout_kills_process(monkeypatch):
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self):
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+        def communicate(self):
+            return "", ""
+
+    process = FakeProcess()
+    monkeypatch.setattr(weekly.subprocess, "Popen", lambda *args, **kwargs: process)
+    times = iter([0, 2])
+    monkeypatch.setattr(weekly.time, "time", lambda: next(times))
+    monkeypatch.setattr(weekly.time, "sleep", lambda seconds: None)
+
+    try:
+        weekly.run_detect_subprocess(make_args(poll_interval=1), timeout_seconds=1)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("expected TimeoutError")
+
+    assert process.killed is True
