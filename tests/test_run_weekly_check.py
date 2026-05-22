@@ -20,6 +20,7 @@ def make_args(**overrides):
         "notify_title": "Notify",
         "dry_run_yuque": False,
         "dry_run_notify": False,
+        "require_wecom": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -33,6 +34,7 @@ def test_run_workflow_success(monkeypatch, tmp_path):
     }
     (tmp_path / "latest.md").write_text("# report", encoding="utf-8")
     monkeypatch.setattr(weekly, "run_detect_subprocess", lambda args, timeout: detect)
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
     monkeypatch.setattr(
         weekly.yuque_markdown_sync,
         "sync_markdown",
@@ -54,6 +56,7 @@ def test_run_workflow_detect_failure_still_notifies(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", fail_detect)
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
 
@@ -70,6 +73,7 @@ def test_run_workflow_timeout_notifies_timeout(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", timeout)
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
 
@@ -89,6 +93,7 @@ def test_run_workflow_yuque_failure_notifies_failure(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", lambda args, timeout: detect)
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.yuque_markdown_sync, "sync_markdown", fail_sync)
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
@@ -97,4 +102,21 @@ def test_run_workflow_yuque_failure_notifies_failure(monkeypatch, tmp_path):
 
     assert record["status"] == "failed"
     assert "yuque failed" in record["error_message"]
+    assert calls[0]["status"] == "failed"
+
+
+def test_run_workflow_preflight_failure_does_not_detect(monkeypatch, tmp_path):
+    def should_not_run(args, timeout):
+        raise AssertionError("detect should not run")
+
+    calls = []
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": False, "errors": ["missing"]})
+    monkeypatch.setattr(weekly, "run_detect_subprocess", should_not_run)
+    monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
+    monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
+
+    record = weekly.run_workflow(make_args())
+
+    assert record["status"] == "failed"
+    assert "前置配置检查失败" in record["error_message"]
     assert calls[0]["status"] == "failed"

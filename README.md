@@ -63,6 +63,19 @@ python scripts/run_weekly_check.py --no-proxy
 python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --dry-run-notify
 ```
 
+只检查 `.env` 配置是否完整：
+
+```powershell
+python scripts/preflight_check.py --json
+```
+
+企业微信默认可不配置；如果希望定时任务强制要求企业微信 Webhook：
+
+```powershell
+python scripts/preflight_check.py --require-wecom
+python scripts/run_weekly_check.py --no-proxy --require-wecom
+```
+
 验证鉴权：
 
 ```powershell

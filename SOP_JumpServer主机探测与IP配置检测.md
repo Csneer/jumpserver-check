@@ -150,7 +150,20 @@ Authorization: AccessKey <access_key_id>:<signature>
 
 ### 4.2 连通性预检
 
-在正式开始前，先发一次简单 GET 请求验证鉴权是否有效：
+在正式开始前，先运行本地配置检查，确认 `.env` 关键项已填写且不是示例占位：
+
+```bash
+python scripts/preflight_check.py --json
+```
+
+企业微信默认是可选项；若定时任务必须推送企业微信，则使用：
+
+```bash
+python scripts/preflight_check.py --require-wecom
+python scripts/run_weekly_check.py --no-proxy --require-wecom
+```
+
+通过本地配置检查后，再发一次简单 GET 请求验证 JumpServer 鉴权是否有效：
 
 ```
 GET /api/v1/users/profile/
@@ -605,6 +618,8 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 | 语雀同步 | API 失败或配置缺失 | 流程标记失败，企业微信推送失败摘要 |
 | 企业微信通知 | Webhook 未配置 | 记录 skipped，不影响主流程状态 |
 | 企业微信通知 | Webhook 返回错误 | 记录通知失败，不覆盖探测/语雀原始状态 |
+
+`run_weekly_check.py` 会在下发 JumpServer Ops 前自动执行 preflight。若配置缺失或仍是占位值，流程会直接失败并尝试推送失败通知，不会创建 Ops job。
 
 ---
 

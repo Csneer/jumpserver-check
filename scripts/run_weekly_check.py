@@ -15,7 +15,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import wecom_notify, yuque_markdown_sync  # noqa: E402
+from scripts import preflight_check, wecom_notify, yuque_markdown_sync  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +129,9 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     yuque_url = ""
 
     try:
+        preflight = preflight_check.validate_config(require_wecom=args.require_wecom)
+        if not preflight.get("ok"):
+            raise RuntimeError("前置配置检查失败：" + "；".join(preflight.get("errors") or []))
         detect_result = run_detect_subprocess(args, args.wait_timeout)
         paths = detect_result.get("paths") or {}
         report_path = str(paths.get("latest") or paths.get("report") or "")
@@ -211,6 +214,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notify-title", default=os.getenv("CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"))
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
+    parser.add_argument("--require-wecom", action="store_true", help="强制要求 WECOM_WEBHOOK_URL 已配置")
     return parser.parse_args()
 
 
