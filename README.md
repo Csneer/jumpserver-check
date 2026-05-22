@@ -42,6 +42,7 @@ YUQUE_SIBLING_URL=
 YUQUE_PUBLIC=0
 
 WECOM_WEBHOOK_URL=
+WECOM_CHANNEL=wecom
 
 CHECK_WAIT_TIMEOUT=1200
 CHECK_POLL_INTERVAL=30
@@ -164,6 +165,8 @@ python scripts\wecom_notify.py `
   --report-path reports\yuque\jumpserver-host-ip-check-latest.md `
   --yuque-url "https://www.yuque.com/example/repo/doc"
 ```
+
+`WECOM_CHANNEL` 默认是 `wecom`，发送企业微信原生 Markdown payload。如果 Webhook 指向自建转发器，可按转发器协议改为 `wecom_text` 或 `wecom_relay`；`wecom_relay` 使用 Alertmanager 风格 payload。
 
 Linux crontab 示例：
 

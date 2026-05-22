@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -98,8 +100,53 @@ def build_markdown_message(
     return "\n".join(lines)
 
 
-def send_wecom_markdown(webhook_url: str, content: str, timeout: int = 20) -> dict[str, Any]:
-    payload = {"msgtype": "markdown", "markdown": {"content": content}}
+def strip_markdown(content: str) -> str:
+    text = content.replace("**", "").replace("`", "")
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    cleaned = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        line = re.sub(r"^\s*>\s?", "", line)
+        line = re.sub(r"^\s*[-*]\s+", "", line)
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def build_alertmanager_payload(title: str, content: str, status: str) -> dict[str, Any]:
+    now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+    alert_status = "firing"
+    return {
+        "status": alert_status,
+        "alerts": [
+            {
+                "status": alert_status,
+                "startsAt": now,
+                "labels": {
+                    "alertname": title,
+                    "severity": "info" if status == "success" else "warning",
+                    "source": "jumpserver-check",
+                    "instance": "jumpserver-check",
+                },
+                "annotations": {
+                    "summary": title,
+                    "description": strip_markdown(content),
+                    "started_at": now.replace("T", " "),
+                },
+            }
+        ],
+    }
+
+
+def build_wecom_payload(channel: str, title: str, content: str, status: str = "success") -> dict[str, Any]:
+    normalized = channel.strip().lower() or "wecom"
+    if normalized in {"wecom_relay", "relay", "alertmanager"}:
+        return build_alertmanager_payload(title, content, status)
+    if normalized in {"wecom_text", "text"}:
+        return {"msgtype": "text", "text": {"content": strip_markdown(content)}}
+    return {"msgtype": "markdown", "markdown": {"content": content}}
+
+
+def send_wecom_message(webhook_url: str, payload: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -124,22 +171,25 @@ def notify(
     yuque_url: str = "",
     error_message: str = "",
     duration_seconds: float | None = None,
+    channel: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     load_dotenv()
     summary = load_summary(summary_json)
     content = build_markdown_message(status, title, summary, report_path, yuque_url, error_message, duration_seconds)
     webhook_url = os.getenv("WECOM_WEBHOOK_URL", "").strip()
+    channel = channel or os.getenv("WECOM_CHANNEL", "wecom")
+    payload = build_wecom_payload(channel, title, content, status)
     if dry_run:
-        result = {"status": "dry_run", "configured": bool(webhook_url), "content": content}
+        result = {"status": "dry_run", "configured": bool(webhook_url), "channel": channel, "payload": payload, "content": content}
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return result
     if not webhook_url:
-        result = {"status": "skipped", "reason": "WECOM_WEBHOOK_URL not configured", "content": content}
+        result = {"status": "skipped", "reason": "WECOM_WEBHOOK_URL not configured", "channel": channel, "payload": payload, "content": content}
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return result
-    response = send_wecom_markdown(webhook_url, content)
-    result = {"status": "sent", "response": response}
+    response = send_wecom_message(webhook_url, payload)
+    result = {"status": "sent", "channel": channel, "response": response}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
@@ -153,6 +203,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yuque-url", default="")
     parser.add_argument("--error-message", default="")
     parser.add_argument("--duration-seconds", type=float)
+    parser.add_argument("--channel", default="", help="wecom/markdown、wecom_text/text、wecom_relay/relay/alertmanager")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -168,6 +219,7 @@ def main() -> None:
             yuque_url=args.yuque_url,
             error_message=args.error_message,
             duration_seconds=args.duration_seconds,
+            channel=args.channel,
             dry_run=args.dry_run,
         )
     except Exception as exc:

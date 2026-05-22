@@ -3,6 +3,13 @@ from pathlib import Path
 from scripts import preflight_check as preflight
 
 
+def isolate_project_root(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(preflight, "env_candidates", lambda: [tmp_path / ".env"])
+    for key in ("WECOM_WEBHOOK_URL", "WECOM_CHANNEL"):
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_validate_config_accepts_missing_optional_wecom(monkeypatch, tmp_path: Path):
     env = tmp_path / ".env"
     env.write_text(
@@ -20,9 +27,7 @@ def test_validate_config_accepts_missing_optional_wecom(monkeypatch, tmp_path: P
         ),
         encoding="utf-8",
     )
-    monkeypatch.chdir(tmp_path)
-    for key in ("WECOM_WEBHOOK_URL",):
-        monkeypatch.delenv(key, raising=False)
+    isolate_project_root(monkeypatch, tmp_path)
 
     result = preflight.validate_config(require_wecom=False)
 
@@ -45,8 +50,7 @@ def test_validate_config_requires_wecom_when_requested(monkeypatch, tmp_path: Pa
         ),
         encoding="utf-8",
     )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("WECOM_WEBHOOK_URL", raising=False)
+    isolate_project_root(monkeypatch, tmp_path)
 
     result = preflight.validate_config(require_wecom=True)
 
@@ -68,7 +72,7 @@ def test_validate_config_rejects_placeholders(monkeypatch, tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    monkeypatch.chdir(tmp_path)
+    isolate_project_root(monkeypatch, tmp_path)
 
     result = preflight.validate_config()
 

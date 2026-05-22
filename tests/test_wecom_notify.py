@@ -5,6 +5,14 @@ import pytest
 from scripts import wecom_notify as notify
 
 
+@pytest.fixture(autouse=True)
+def isolate_dotenv(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(notify, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("WECOM_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("WECOM_CHANNEL", raising=False)
+
+
 def test_load_summary_prefers_inline_json_over_path_checks():
     payload = {
         "summary": {"total_assets": 353},
@@ -51,6 +59,27 @@ def test_build_markdown_message_includes_summary_and_links():
     assert "reports/yuque/latest.md" in message
 
 
+def test_build_wecom_payload_defaults_to_markdown():
+    payload = notify.build_wecom_payload("wecom", "title", "## title\n\ncontent")
+
+    assert payload == {"msgtype": "markdown", "markdown": {"content": "## title\n\ncontent"}}
+
+
+def test_build_wecom_payload_supports_text_channel():
+    payload = notify.build_wecom_payload("wecom_text", "title", "**状态**：[doc](https://example.com)")
+
+    assert payload == {"msgtype": "text", "text": {"content": "状态：doc"}}
+
+
+def test_build_wecom_payload_supports_relay_channel():
+    payload = notify.build_wecom_payload("wecom_relay", "JumpServer 每周主机巡检", "**状态**：成功", "success")
+
+    assert payload["status"] == "firing"
+    assert payload["alerts"][0]["labels"]["source"] == "jumpserver-check"
+    assert payload["alerts"][0]["annotations"]["summary"] == "JumpServer 每周主机巡检"
+    assert payload["alerts"][0]["annotations"]["description"] == "状态：成功"
+
+
 def test_notify_skips_when_webhook_missing(monkeypatch):
     monkeypatch.delenv("WECOM_WEBHOOK_URL", raising=False)
 
@@ -75,7 +104,7 @@ def test_notify_raises_when_send_fails(monkeypatch):
     def fail_send(webhook_url, content, timeout=20):
         raise RuntimeError("bad webhook")
 
-    monkeypatch.setattr(notify, "send_wecom_markdown", fail_send)
+    monkeypatch.setattr(notify, "send_wecom_message", fail_send)
 
     with pytest.raises(RuntimeError, match="bad webhook"):
         notify.notify("success", "title")
