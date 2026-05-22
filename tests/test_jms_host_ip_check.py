@@ -82,6 +82,16 @@ def test_detection_command_is_read_only_and_has_markers():
         assert forbidden not in command
 
 
+def test_detection_command_ignores_commented_debian_dhcp_config():
+    command = check.DETECTION_COMMAND
+
+    assert 'interfaces_type="$(awk' in command
+    assert "/^[[:space:]]*#/ { next }" in command
+    assert "cur_iface == iface" in command
+    assert '$1 == "address" && $2 == ip' in command
+    assert "grep -Eiq 'iface[[:space:]].*[[:space:]]dhcp' /etc/network/interfaces" not in command
+
+
 def test_build_ops_payload_uses_asset_and_node_ids():
     payload = check.build_ops_payload(
         [

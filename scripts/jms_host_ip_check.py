@@ -109,11 +109,37 @@ if [ "$ip_type" = "unknown" ] && [ -d /etc/netplan ]; then
 fi
 
 if [ "$ip_type" = "unknown" ] && [ -f /etc/network/interfaces ]; then
-  if grep -Eiq 'iface[[:space:]].*[[:space:]]dhcp' /etc/network/interfaces 2>/dev/null; then
-    ip_type="dhcp"
-  elif grep -Eiq 'iface[[:space:]].*[[:space:]]static' /etc/network/interfaces 2>/dev/null; then
-    ip_type="static"
-  fi
+  interfaces_type="$(awk -v iface="$if_name" -v ip="$actual_ip" '
+    function flush() {
+      if (method == "") return
+      if (iface != "" && cur_iface == iface) iface_method = method
+      if (ip != "" && has_ip == 1) ip_method = method
+      if (first_method == "") first_method = method
+    }
+    /^[[:space:]]*#/ { next }
+    {
+      sub(/[[:space:]]+#.*/, "")
+      if ($0 ~ /^[[:space:]]*$/) next
+    }
+    $1 == "iface" && $3 == "inet" {
+      flush()
+      cur_iface = $2
+      method = tolower($4)
+      has_ip = 0
+      next
+    }
+    $1 == "address" && $2 == ip { has_ip = 1 }
+    END {
+      flush()
+      if (iface_method != "") print iface_method
+      else if (ip_method != "") print ip_method
+      else print first_method
+    }
+  ' /etc/network/interfaces 2>/dev/null | head -1 | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  case "$interfaces_type" in
+    static|manual|none) ip_type="static" ;;
+    dhcp) ip_type="dhcp" ;;
+  esac
 fi
 
 if [ "$ip_type" = "unknown" ]; then
