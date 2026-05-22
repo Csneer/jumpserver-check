@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import re
+import socket
 import ssl
 import time
 from collections import Counter
@@ -27,6 +28,8 @@ PROFILE_ENDPOINTS = (
     "/api/v1/users/users/profile/",
     "/api/v1/authentication/users/profile/",
 )
+RETRYABLE_STATUSES = {0, 408, 429, 500, 502, 503, 504}
+REQUEST_RETRY_DELAY = 0.2
 DETECTION_COMMAND = r'''
 set +e
 export LC_ALL=C
@@ -92,6 +95,12 @@ fi
 if [ "$ip_type" = "unknown" ]; then
   for f in /etc/sysconfig/network-scripts/ifcfg-*; do
     [ -f "$f" ] || continue
+    cfg_iface="$(grep -i '^DEVICE=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    cfg_name="$(grep -i '^NAME=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    cfg_ip="$(grep -i '^IPADDR=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    if [ -n "$if_name" ] && [ "$cfg_iface" != "$if_name" ] && [ "$cfg_name" != "$if_name" ]; then
+      if [ -z "$actual_ip" ] || [ "$cfg_ip" != "$actual_ip" ]; then continue; fi
+    fi
     bootproto="$(grep -i '^BOOTPROTO=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
     case "$bootproto" in
       static|none) ip_type="static"; break ;;
@@ -101,9 +110,30 @@ if [ "$ip_type" = "unknown" ]; then
 fi
 
 if [ "$ip_type" = "unknown" ] && [ -d /etc/netplan ]; then
-  if grep -Riq 'dhcp4:[[:space:]]*true' /etc/netplan/*.yaml /etc/netplan/*.yml 2>/dev/null; then
+  netplan_type="$(awk -v iface="$if_name" -v ip="$actual_ip" '
+    /^[[:space:]]*#/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]+#.*/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+      if (iface != "" && line ~ "^[[:space:]]*" iface ":[[:space:]]*$") in_iface = 1
+      else if (line ~ /^[[:space:]]*[-A-Za-z0-9_.:]+:[[:space:]]*$/ && line !~ /^[[:space:]]*(network|version|renderer|ethernets|bonds|bridges|vlans|wifis):/) in_iface = 0
+      if (ip != "" && line ~ /addresses:[[:space:]]*/ && index(line, ip) > 0) ip_method = "static"
+      if (in_iface && line ~ /dhcp4:[[:space:]]*true/) iface_method = "dhcp"
+      if (in_iface && line ~ /dhcp4:[[:space:]]*false/) iface_method = "static"
+      if (in_iface && line ~ /addresses:[[:space:]]*/) iface_method = "static"
+      if (first_method == "" && line ~ /dhcp4:[[:space:]]*true/) first_method = "dhcp"
+      if (first_method == "" && line ~ /addresses:[[:space:]]*/) first_method = "static"
+    }
+    END {
+      if (iface_method != "") print iface_method
+      else if (ip_method != "") print ip_method
+      else print first_method
+    }
+  ' /etc/netplan/*.yaml /etc/netplan/*.yml 2>/dev/null | head -1 | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  if [ "$netplan_type" = "dhcp" ]; then
     ip_type="dhcp"
-  elif grep -Riq 'addresses:[[:space:]]*' /etc/netplan/*.yaml /etc/netplan/*.yml 2>/dev/null; then
+  elif [ "$netplan_type" = "static" ]; then
     ip_type="static"
   fi
 fi
@@ -220,7 +250,15 @@ class JumpServerClient:
             handlers.append(request.HTTPSHandler(context=self.context))
         self.opener = request.build_opener(*handlers) if handlers else None
 
-    def request(self, method: str, path: str, params: dict[str, Any] | None = None, body: Any = None, timeout: int = 20) -> tuple[int, Any]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: Any = None,
+        timeout: int = 20,
+        retries: int | None = None,
+    ) -> tuple[int, Any]:
         path_with_query = canonical_path(path, params)
         headers = {
             "accept": "application/json",
@@ -232,25 +270,46 @@ class JumpServerClient:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         headers["Authorization"] = signature_header(self.key_id, self.secret, method, path_with_query, headers)
-        req = request.Request(self.base + path_with_query, data=data, headers=headers, method=method.upper())
-        try:
-            opener = self.opener or request
-            if self.opener:
-                response = opener.open(req, timeout=timeout)
-            else:
-                response = opener.urlopen(req, timeout=timeout, context=self.context)
-            with response as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-                return resp.status, json.loads(raw) if raw else None
-        except error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+        max_attempts = 1 + (retries if retries is not None else (2 if method.upper() == "GET" else 0))
+        last_status = 0
+        last_payload: Any = None
+        for attempt in range(max_attempts):
+            req = request.Request(self.base + path_with_query, data=data, headers=headers, method=method.upper())
             try:
-                payload: Any = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = raw
-            return exc.code, payload
-        except error.URLError as exc:
-            return 0, {"error": str(exc.reason)}
+                opener = self.opener or request
+                if self.opener:
+                    response = opener.open(req, timeout=timeout)
+                else:
+                    response = opener.urlopen(req, timeout=timeout, context=self.context)
+                with response as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                    if not raw:
+                        return resp.status, None
+                    try:
+                        return resp.status, json.loads(raw)
+                    except json.JSONDecodeError:
+                        return resp.status, api_error_payload("non_json_response", "JumpServer API returned non-JSON response", body_excerpt=raw[:500])
+            except error.HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                try:
+                    payload: Any = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload = api_error_payload("http_error", f"JumpServer API returned HTTP {exc.code}", body_excerpt=raw[:500])
+                last_status, last_payload = exc.code, payload
+            except error.URLError as exc:
+                last_status = 0
+                last_payload = api_error_payload("url_error", str(exc.reason))
+            except (TimeoutError, socket.timeout) as exc:
+                last_status = 0
+                last_payload = api_error_payload("timeout", str(exc))
+            except (ssl.SSLError, OSError) as exc:
+                last_status = 0
+                last_payload = api_error_payload(exc.__class__.__name__, str(exc))
+            if attempt < max_attempts - 1 and is_retryable_status(last_status):
+                time.sleep(REQUEST_RETRY_DELAY)
+                continue
+            return last_status, last_payload
+        return last_status, last_payload
 
     def get(self, path: str, params: dict[str, Any] | None = None, timeout: int = 20) -> tuple[int, Any]:
         return self.request("GET", path, params=params, timeout=timeout)
@@ -260,6 +319,26 @@ class JumpServerClient:
 
 def compact(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def api_error_payload(kind: str, message: str, **extra: Any) -> dict[str, Any]:
+    payload = {"error": kind, "message": message}
+    payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
+def is_retryable_status(status: int) -> bool:
+    return status in RETRYABLE_STATUSES
+
+
+def api_error_remark(action: str, status: int, payload: Any) -> str:
+    message = ""
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or payload.get("error") or "")
+    elif payload:
+        message = str(payload)
+    suffix = f"：{message}" if message else ""
+    return f"{action}失败: HTTP {status}{suffix}"
 
 
 def items_from_payload(payload: Any) -> list[dict[str, Any]]:
@@ -575,6 +654,10 @@ def permission_denied_result(asset: dict[str, Any], remark: str = "当前账号�
     return base_result(asset, "permission_denied", remark=remark, source="preflight")
 
 
+def status_result(asset: dict[str, Any], status: str, remark: str, connectivity: str = "unknown") -> dict[str, Any]:
+    return base_result(asset, status, connectivity=connectivity, remark=remark)
+
+
 def build_ops_payload(batch: list[dict[str, Any]], batch_index: int, timeout: int, runas: str = "root") -> dict[str, Any]:
     asset_ids = [asset.get("id") for asset in batch if asset.get("id")]
     if len(asset_ids) != len(batch):
@@ -614,6 +697,11 @@ def fetch_full_job_log(client: JumpServerClient, task_id: str, max_pages: int = 
     for _ in range(max_pages):
         params = {"mark": mark} if mark else None
         status, payload = client.get(f"/api/v1/ops/ansible/job-execution/{task_id}/log/", params=params)
+        if not (200 <= status < 300):
+            text = compact(payload)
+            chunks_text.append(text)
+            pages.append({"status": status, "end": False, "mark": mark, "length": len(text), "error": True})
+            break
         if not isinstance(payload, dict):
             chunks_text.append(clean_ansible_log(payload))
             pages.append({"status": status, "end": True, "mark": mark, "length": len(chunks_text[-1])})
@@ -629,6 +717,19 @@ def fetch_full_job_log(client: JumpServerClient, task_id: str, max_pages: int = 
             break
         mark = str(next_mark)
     return status, "".join(chunks_text), pages
+
+
+def log_fetch_failed(status: int, pages: list[dict[str, Any]]) -> bool:
+    if not (200 <= status < 300):
+        return True
+    if not pages:
+        return True
+    last_page = pages[-1]
+    if last_page.get("error"):
+        return True
+    if last_page.get("end") is False and not last_page.get("mark"):
+        return True
+    return False
 
 
 def parse_kv_block(text: str) -> dict[str, str] | None:
@@ -799,6 +900,18 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         base["probe_status"] = "parse_error"
         base["remark"] = remark or "JumpServer Ops 未能解析探测命令参数"
         return base
+    if (
+        "syntax error" in lowered
+        or "bad substitution" in lowered
+        or "unexpected eof" in lowered
+        or "unexpected end of file" in lowered
+        or "command not found" in lowered
+        or "not found" in lowered and "detect_start" in lowered
+    ):
+        base["connectivity"] = "ok"
+        base["probe_status"] = "probe_script_error"
+        base["remark"] = remark or "远端探测脚本执行异常，未拿到有效探测输出"
+        return base
     if "unreachable" in lowered or "failed to connect" in lowered or "permission denied" in lowered:
         base["remark"] = remark or "JumpServer Ops 返回连接失败"
         return base
@@ -868,8 +981,9 @@ def run_batch(
         "polls": [],
     }
     if not (200 <= create_status < 300) or not task_id:
+        remark = api_error_remark("Ops 作业创建", create_status, created)
         batch_record["results"] = [
-            classify_probe_result(asset, "", timed_out=True, remark=f"Ops 作业创建失败: HTTP {create_status}") for asset in batch
+            status_result(asset, "api_error", remark) for asset in batch
         ]
         return batch_record
     if resume_state_path is not None:
@@ -906,6 +1020,12 @@ def collect_batch_result(
     task: dict[str, Any] = {}
     while time.time() < deadline:
         task_status, task_payload = client.get(f"/api/v1/ops/job-execution/task-detail/{task_id}/")
+        if not (200 <= task_status < 300):
+            remark = api_error_remark("Ops 任务状态查询", task_status, task_payload)
+            batch_record.setdefault("polls", []).append({"status": task_status, "error": task_payload})
+            batch_record["task"] = {"status": "api_error", "is_finished": False, "is_success": False, "task_id": task_id}
+            batch_record["results"] = [status_result(asset, "api_error", remark) for asset in batch]
+            return batch_record
         task = task_payload if isinstance(task_payload, dict) else {}
         batch_record.setdefault("polls", []).append(
             {
@@ -945,6 +1065,10 @@ def collect_batch_result(
     batch_record["log_pages"] = log_pages
     batch_record["log"] = log_text
     batch_record["log_excerpt"] = log_text[:2000]
+    if log_fetch_failed(log_status, log_pages):
+        remark = f"Ops 日志拉取失败或分页中断，task_id={task_id}, HTTP {log_status}"
+        batch_record["results"] = [status_result(asset, "log_fetch_error", remark) for asset in batch]
+        return batch_record
     results = []
     for asset in batch:
         segment = section_for_asset(asset, log_text, len(batch))
@@ -1050,12 +1174,15 @@ PROBLEM_STATUSES = (
     "ip_mismatch",
     "duplicate_asset",
     "unreachable",
+    "api_error",
+    "log_fetch_error",
     "probe_timeout",
     "ops_no_output",
     "ops_module_error",
     "permission_denied",
     "no_account",
     "parse_error",
+    "probe_script_error",
 )
 
 
@@ -1124,12 +1251,15 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "ip_mismatch",
             "duplicate_asset",
             "unreachable",
+            "api_error",
+            "log_fetch_error",
             "probe_timeout",
             "ops_no_output",
             "ops_module_error",
             "permission_denied",
             "no_account",
             "parse_error",
+            "probe_script_error",
             "skipped_windows",
         )]),
         "",

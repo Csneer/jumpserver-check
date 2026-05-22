@@ -22,12 +22,15 @@ STATUS_COUNT_LABELS = {
     "ip_mismatch": "IP不匹配",
     "duplicate_asset": "重复资产",
     "unreachable": "不可达",
+    "api_error": "API异常",
+    "log_fetch_error": "日志拉取异常",
     "probe_timeout": "探测超时",
     "ops_no_output": "Ops无输出",
     "ops_module_error": "Ops模块错误",
     "permission_denied": "未授权",
     "no_account": "无账号",
     "parse_error": "解析失败",
+    "probe_script_error": "探测脚本异常",
     "skipped_windows": "跳过Windows",
 }
 
@@ -102,12 +105,15 @@ def build_markdown_message(
             "ip_mismatch",
             "duplicate_asset",
             "unreachable",
+            "api_error",
+            "log_fetch_error",
             "probe_timeout",
             "ops_no_output",
             "ops_module_error",
             "permission_denied",
             "no_account",
             "parse_error",
+            "probe_script_error",
             "skipped_windows",
         ]
         count_text = "，".join(
@@ -129,12 +135,15 @@ def ordered_status_counts(status_counts: dict[str, Any]) -> list[tuple[str, int]
         "ip_mismatch",
         "duplicate_asset",
         "unreachable",
+        "api_error",
+        "log_fetch_error",
         "probe_timeout",
         "ops_no_output",
         "ops_module_error",
         "permission_denied",
         "no_account",
         "parse_error",
+        "probe_script_error",
         "skipped_windows",
     ]
     result: list[tuple[str, int]] = []

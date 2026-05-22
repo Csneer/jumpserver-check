@@ -51,12 +51,14 @@ hostname -I
 
 1. NetworkManager connection 文件：`/etc/NetworkManager/system-connections/*.nmconnection`
 2. `nmcli -t -f GENERAL.DEVICES,ipv4.method conn show --active`
-3. CentOS/RHEL ifcfg：`/etc/sysconfig/network-scripts/ifcfg-*`
-4. Ubuntu netplan：`/etc/netplan/*.yaml`、`*.yml`
-5. Debian interfaces：`/etc/network/interfaces`
+3. CentOS/RHEL ifcfg：`/etc/sysconfig/network-scripts/ifcfg-*`，优先匹配默认路由网卡或实际 IP 所在配置。
+4. Ubuntu netplan：`/etc/netplan/*.yaml`、`*.yml`，优先匹配默认路由网卡或实际 IP 所在配置。
+5. Debian interfaces：`/etc/network/interfaces`，忽略注释并优先匹配默认路由网卡或实际 IP 所在配置。
 6. 兜底检查 `dhclient` 进程
 
 如果后续优化命令，优先保持这套输出字段不变。需要新增字段时，应先补解析和测试，再上线定时任务。
+
+如果 Ops 日志显示远端 shell 语法错误、`bad substitution`、`unexpected EOF`、关键命令缺失等脚本执行异常，报告会归类为 `probe_script_error`，不再混入主机不可达。JumpServer API 或日志接口异常会分别归类为 `api_error`、`log_fetch_error`。
 
 ## 修改后的验证要求
 

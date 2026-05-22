@@ -59,6 +59,23 @@ def test_build_markdown_message_includes_summary_and_links():
     assert "reports/yuque/latest.md" in message
 
 
+def test_new_probe_error_statuses_have_labels():
+    assert notify.status_count_label("api_error") == "API异常"
+    assert notify.status_count_label("log_fetch_error") == "日志拉取异常"
+    assert notify.status_count_label("probe_script_error") == "探测脚本异常"
+
+    summary = {
+        "summary": {"total_assets": 3, "linux_assets": 3},
+        "status_counts": {"api_error": 1, "log_fetch_error": 1, "probe_script_error": 1},
+    }
+
+    message = notify.build_markdown_message("success", "JumpServer 每周主机巡检", summary)
+
+    assert "API异常: 1" in message
+    assert "日志拉取异常: 1" in message
+    assert "探测脚本异常: 1" in message
+
+
 def test_build_wecom_payload_defaults_to_markdown():
     payload = notify.build_wecom_payload("wecom", "title", "## title\n\ncontent")
 

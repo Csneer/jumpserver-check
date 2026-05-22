@@ -92,6 +92,17 @@ def test_detection_command_ignores_commented_debian_dhcp_config():
     assert "grep -Eiq 'iface[[:space:]].*[[:space:]]dhcp' /etc/network/interfaces" not in command
 
 
+def test_detection_command_prioritizes_route_interface_configs():
+    command = check.DETECTION_COMMAND
+
+    assert 'cfg_iface="$(grep -i \'^DEVICE=\'' in command
+    assert 'cfg_ip="$(grep -i \'^IPADDR=\'' in command
+    assert '[ "$cfg_iface" != "$if_name" ]' in command
+    assert 'netplan_type="$(awk -v iface="$if_name" -v ip="$actual_ip"' in command
+    assert 'iface_method = "dhcp"' in command
+    assert 'ip_method = "static"' in command
+
+
 def test_build_ops_payload_uses_asset_and_node_ids():
     payload = check.build_ops_payload(
         [
@@ -131,6 +142,86 @@ def test_fetch_full_job_log_follows_marks():
         ("/api/v1/ops/ansible/job-execution/task-1/log/", {"mark": "m1"}),
     ]
     assert pages[-1]["end"] is True
+
+
+def test_fetch_full_job_log_records_http_error():
+    class Client:
+        def get(self, path, params=None):
+            return 500, {"error": "temporary failure"}
+
+    status, log, pages = check.fetch_full_job_log(Client(), "task-1")
+
+    assert status == 500
+    assert "temporary failure" in log
+    assert pages[-1]["error"] is True
+    assert check.log_fetch_failed(status, pages)
+
+
+def test_jumpserver_client_get_retries_temporary_errors(monkeypatch):
+    calls = {"count": 0}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(req, timeout=20, context=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise check.error.URLError("temporary network issue")
+        return Response()
+
+    monkeypatch.setattr(check.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(check.time, "sleep", lambda seconds: None)
+    client = object.__new__(check.JumpServerClient)
+    client.base = "https://jumpserver.example"
+    client.key_id = "key"
+    client.secret = "secret"
+    client.org = check.DEFAULT_ORG
+    client.context = None
+    client.opener = None
+
+    status, payload = client.get("/api/v1/users/profile/")
+
+    assert calls["count"] == 2
+    assert status == 200
+    assert payload == {"ok": True}
+
+
+def test_jumpserver_client_non_json_response_is_structured(monkeypatch):
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"<html>bad gateway</html>"
+
+    monkeypatch.setattr(check.request, "urlopen", lambda req, timeout=20, context=None: Response())
+    client = object.__new__(check.JumpServerClient)
+    client.base = "https://jumpserver.example"
+    client.key_id = "key"
+    client.secret = "secret"
+    client.org = check.DEFAULT_ORG
+    client.context = None
+    client.opener = None
+
+    status, payload = client.get("/api/v1/users/profile/")
+
+    assert status == 200
+    assert payload["error"] == "non_json_response"
+    assert "bad gateway" in payload["body_excerpt"]
 
 
 def test_run_batch_writes_resume_state(tmp_path: Path):
@@ -266,11 +357,44 @@ def test_parse_probe_ops_failure_statuses():
     no_account = check.classify_probe_result(asset, "host-a | FAILED! => 无可用账号")
     no_output = check.classify_probe_result(asset, "Task ops.tasks.run succeeded in 63.072868722025305s: None")
     module_error = check.classify_probe_result(asset, "module_stderr: Traceback\nAnsiballZ_command.py failed")
+    script_error = check.classify_probe_result(asset, "host-a | FAILED | rc=2 >>\n/bin/sh: 1: Syntax error: unexpected EOF")
 
     assert permission["probe_status"] == "permission_denied"
     assert no_account["probe_status"] == "no_account"
     assert no_output["probe_status"] == "ops_no_output"
     assert module_error["probe_status"] == "ops_module_error"
+    assert script_error["probe_status"] == "probe_script_error"
+
+
+def test_run_batch_create_failure_maps_to_api_error():
+    class Client:
+        def post(self, path, body):
+            return 500, {"message": "server busy"}
+
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+
+    record = check.run_batch(Client(), [asset], 1, -1, 0, "root", 1)
+
+    assert record["results"][0]["probe_status"] == "api_error"
+    assert "server busy" in record["results"][0]["remark"]
+
+
+def test_collect_batch_log_failure_maps_to_log_fetch_error():
+    class Client:
+        def get(self, path, params=None):
+            if "task-detail" in path:
+                return 200, {"status": "success", "is_finished": True, "is_success": True, "summary": {}}
+            if "log" in path:
+                return 502, {"message": "gateway timeout"}
+            return 200, {}
+
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    record = {"batch_index": 1, "asset_count": 1, "polls": []}
+
+    result = check.collect_batch_result(Client(), [asset], record, "task-1", 0, 1)
+
+    assert result["results"][0]["probe_status"] == "log_fetch_error"
+    assert "task-1" in result["results"][0]["remark"]
 
 
 def test_summary_message_for_asset_matches_normalized_labels():
@@ -450,6 +574,29 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
     assert "batch" in content
     assert "## 异常主机" in content
     assert "## 全量明细" in content
+
+
+def test_markdown_report_includes_new_error_statuses():
+    started = check.dt.datetime(2026, 5, 19, 10, 0, tzinfo=check.dt.timezone.utc).astimezone()
+    results = [
+        check.base_result({"name": "api-host", "address": "192.0.2.1"}, "api_error", remark="Ops 作业创建失败"),
+        check.base_result({"name": "log-host", "address": "192.0.2.2"}, "log_fetch_error", remark="日志拉取失败"),
+        check.base_result({"name": "script-host", "address": "192.0.2.3"}, "probe_script_error", remark="语法错误"),
+    ]
+
+    content = check.build_markdown_report(
+        results,
+        started,
+        started,
+        summary={"total_assets": 3, "linux_assets": 3, "windows_assets": 0},
+    )
+
+    assert "| api_error | 1 |" in content
+    assert "| log_fetch_error | 1 |" in content
+    assert "| probe_script_error | 1 |" in content
+    assert "### api_error（1）" in content
+    assert "### log_fetch_error（1）" in content
+    assert "### probe_script_error（1）" in content
 
 
 def test_run_detect_resumes_matching_state(monkeypatch, tmp_path: Path):
