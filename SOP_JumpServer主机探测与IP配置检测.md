@@ -543,7 +543,8 @@ Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主�
 ```bash
 python scripts/yuque_markdown_sync.py reports/yuque/jumpserver-host-ip-check-latest.md \
   --slug jumpserver-host-ip-check \
-  --audit-timestamp
+  --audit-timestamp \
+  --sibling-url "https://leyaoyao.yuque.com/vurq8u/tiatz9/jumpserver-host-ip-check-20260520-112511"
 ```
 
 `--audit-timestamp` 会从报告中的探测开始时间生成标题和 slug，例如：
@@ -554,6 +555,8 @@ jumpserver-host-ip-check-20260521-184745
 ```
 
 这样每周定时任务都会创建或更新独立的时间戳文档，不覆盖历史审计记录。
+
+如果配置了 `YUQUE_SIBLING_URL`，脚本会自动读取该文档所在目录，并把新报告挂载到它的同级目录中。也可以直接配置 `YUQUE_TARGET_TOC_UUID` 固定目录 UUID。
 
 ### 10.5 企业微信通知
 
@@ -656,6 +659,7 @@ yuque:
   repo_namespace: "vurq8u/tiatz9"
   slug: "jumpserver-host-ip-check"
   audit_timestamp: true
+  sibling_url: "https://leyaoyao.yuque.com/vurq8u/tiatz9/jumpserver-host-ip-check-20260520-112511"
 ```
 
 ---

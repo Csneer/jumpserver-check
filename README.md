@@ -38,6 +38,7 @@ YUQUE_TOKEN=replace-with-yuque-token
 YUQUE_REPO_NAMESPACE=your-login-or-group/your-repo
 YUQUE_URL=
 YUQUE_TARGET_TOC_UUID=
+YUQUE_SIBLING_URL=
 YUQUE_PUBLIC=0
 
 WECOM_WEBHOOK_URL=
@@ -131,8 +132,11 @@ python scripts\yuque_markdown_sync.py `
   reports\yuque\jumpserver-host-ip-check-latest.md `
   --title "JumpServer 主机探测与 IP 配置检测报告" `
   --slug jumpserver-host-ip-check `
-  --audit-timestamp
+  --audit-timestamp `
+  --sibling-url "https://leyaoyao.yuque.com/vurq8u/tiatz9/jumpserver-host-ip-check-20260520-112511"
 ```
+
+也可以在 `.env` 中配置 `YUQUE_SIBLING_URL`，`run_weekly_check.py` 会自动把新报告挂到该文档同级目录。
 
 测试单台主机并同步：
 
