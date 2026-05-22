@@ -15,7 +15,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import preflight_check, wecom_notify, yuque_markdown_sync  # noqa: E402
+from scripts import preflight_check, profile_env, wecom_notify, yuque_markdown_sync  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +35,10 @@ def load_dotenv() -> None:
             key = key.strip()
             if key and not os.environ.get(key):
                 os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def load_runtime_env(profile: str | None = None, env_file: str | None = None) -> profile_env.ProfileEnv:
+    return profile_env.load_profile_env(profile, env_file)
 
 
 def env_int(name: str, default: int) -> int:
@@ -73,6 +77,8 @@ def run_detect_subprocess(args: argparse.Namespace, timeout_seconds: int) -> dic
             args.raw_output_dir,
             "--retention-count",
             str(args.retention_count),
+            "--resume-state",
+            args.resume_state,
         ]
     )
     if args.no_resume:
@@ -146,7 +152,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     yuque_url = ""
 
     try:
-        preflight = preflight_check.validate_config(require_wecom=args.require_wecom)
+        runtime_env = load_runtime_env(args.profile, args.env_file)
+        preflight = preflight_check.validate_config(require_wecom=args.require_wecom, profile=args.profile, env_file=args.env_file)
         if not preflight.get("ok"):
             raise RuntimeError("前置配置检查失败：" + "；".join(preflight.get("errors") or []))
         detect_result = run_detect_subprocess(args, args.wait_timeout)
@@ -203,6 +210,9 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         print(f"提示：企业微信推送失败：{exc}", file=sys.stderr)
 
     record = {
+        "profile": args.profile,
+        "env_file": runtime_env.env_file if "runtime_env" in locals() else args.env_file,
+        "loaded_env_files": runtime_env.loaded_files if "runtime_env" in locals() else [],
         "status": status,
         "duration_seconds": duration,
         "error_message": error_message,
@@ -210,28 +220,42 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "yuque": yuque_result,
         "wecom": notify_result,
     }
-    record_path = write_workflow_record(record, PROJECT_ROOT / "artifacts" / "workflow")
+    record_path = write_workflow_record(record, PROJECT_ROOT / profile_env.profile_path("artifacts/workflow", args.profile))
     record["workflow_record"] = str(record_path)
     print(json.dumps(record, ensure_ascii=False, indent=2))
     return record
 
 
 def parse_args() -> argparse.Namespace:
-    load_dotenv()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--profile", default=profile_env.DEFAULT_PROFILE)
+    pre_parser.add_argument("--env-file", default="")
+    pre_args, _ = pre_parser.parse_known_args()
+    runtime_env = load_runtime_env(pre_args.profile, pre_args.env_file)
+    profile = runtime_env.profile
     parser = argparse.ArgumentParser(description="Run JumpServer check, sync Yuque report, and notify WeCom.")
+    parser.add_argument("--profile", default=profile)
+    parser.add_argument("--env-file", default=pre_args.env_file)
     parser.add_argument("--no-proxy", action="store_true")
     parser.add_argument("--wait-timeout", type=int, default=env_int("CHECK_WAIT_TIMEOUT", 1200))
     parser.add_argument("--poll-interval", type=int, default=env_int("CHECK_POLL_INTERVAL", 30))
-    parser.add_argument("--output-dir", default=os.getenv("CHECK_OUTPUT_DIR", "reports/yuque"))
-    parser.add_argument("--raw-output-dir", default=os.getenv("CHECK_RAW_OUTPUT_DIR", "artifacts/raw"))
+    parser.add_argument("--output-dir", default=profile_env.profile_default_path(runtime_env, "CHECK_OUTPUT_DIR", "reports/yuque"))
+    parser.add_argument("--raw-output-dir", default=profile_env.profile_default_path(runtime_env, "CHECK_RAW_OUTPUT_DIR", "artifacts/raw"))
+    parser.add_argument(
+        "--resume-state",
+        default=str(PROJECT_ROOT / profile_env.profile_path("artifacts/state", profile) / "jms-host-ip-check-inflight.json"),
+    )
     parser.add_argument("--retention-count", type=int, default=env_int("CHECK_RETENTION_COUNT", 12))
     parser.add_argument("--query", default="")
     parser.add_argument("--max-assets", type=int)
-    parser.add_argument("--yuque-title", default=os.getenv("CHECK_YUQUE_TITLE", DEFAULT_TITLE))
-    parser.add_argument("--yuque-slug", default=os.getenv("CHECK_YUQUE_SLUG", DEFAULT_SLUG))
+    parser.add_argument("--yuque-title", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_TITLE", DEFAULT_TITLE))
+    parser.add_argument("--yuque-slug", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_SLUG", DEFAULT_SLUG, slug=True))
     parser.add_argument("--toc-uuid", default=os.getenv("YUQUE_TARGET_TOC_UUID", ""))
     parser.add_argument("--sibling-url", default=os.getenv("YUQUE_SIBLING_URL", ""))
-    parser.add_argument("--notify-title", default=os.getenv("CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"))
+    parser.add_argument(
+        "--notify-title",
+        default=profile_env.profile_default_name(runtime_env, "CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"),
+    )
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
     parser.add_argument("--require-wecom", action="store_true", help="强制要求 WECOM_WEBHOOK_URL 已配置")

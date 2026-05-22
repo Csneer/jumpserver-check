@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import profile_env  # noqa: E402
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER_PREFIXES = ("replace-with-", "your-login-or-group/", "jumpserver.example.com")
@@ -20,7 +25,7 @@ def env_candidates() -> list[Path]:
 
 
 def load_env_files() -> dict[str, str]:
-    values: dict[str, str] = {}
+    values: dict[str, str] = dict(os.environ)
     seen: set[Path] = set()
     for path in env_candidates():
         resolved = path.resolve()
@@ -34,7 +39,7 @@ def load_env_files() -> dict[str, str]:
             key, value = line.split("=", 1)
             key = key.strip()
             cleaned = value.strip().strip('"').strip("'")
-            if key and key not in values:
+            if key:
                 values[key] = cleaned
             if key and not os.environ.get(key):
                 os.environ[key] = cleaned
@@ -65,13 +70,14 @@ def check_int(values: dict[str, str], key: str, default: int, errors: list[str])
         errors.append(f"{key} 必须大于 0")
 
 
-def validate_config(require_wecom: bool = False) -> dict[str, Any]:
-    values = load_env_files()
+def validate_config(require_wecom: bool = False, profile: str = profile_env.DEFAULT_PROFILE, env_file: str = "") -> dict[str, Any]:
+    runtime_env = profile_env.load_profile_env(profile, env_file)
+    values = runtime_env.values
     errors: list[str] = []
     warnings: list[str] = []
 
-    if not any(path.exists() for path in env_candidates()):
-        errors.append("项目 .env 文件不存在")
+    if not runtime_env.loaded_files:
+        errors.append("项目 .env 或 profile env 文件不存在")
 
     for key in ("JMS_URL", "JMS_ACCESS_KEY_ID", "JMS_ACCESS_KEY_SECRET"):
         require_key(values, key, errors)
@@ -106,6 +112,9 @@ def validate_config(require_wecom: bool = False) -> dict[str, Any]:
         "errors": errors,
         "warnings": warnings,
         "checked": {
+            "profile": runtime_env.profile,
+            "env_file": runtime_env.env_file,
+            "loaded_env_files": runtime_env.loaded_files,
             "jumpserver": True,
             "yuque": True,
             "wecom_required": require_wecom,
@@ -116,6 +125,8 @@ def validate_config(require_wecom: bool = False) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="检查 JumpServer 巡检所需 .env 配置是否完整。")
+    parser.add_argument("--profile", default=profile_env.DEFAULT_PROFILE, help="JumpServer 环境 profile 名称")
+    parser.add_argument("--env-file", default="", help="指定 profile env 文件；默认 configs/profiles/<profile>.env")
     parser.add_argument("--require-wecom", action="store_true", help="强制要求 WECOM_WEBHOOK_URL 已配置")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     return parser.parse_args()
@@ -123,7 +134,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    result = validate_config(require_wecom=args.require_wecom)
+    result = validate_config(require_wecom=args.require_wecom, profile=args.profile, env_file=args.env_file)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:

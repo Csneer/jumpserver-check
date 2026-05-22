@@ -7,10 +7,13 @@ from scripts import run_weekly_check as weekly
 def make_args(**overrides):
     values = {
         "no_proxy": True,
+        "profile": "default",
+        "env_file": "",
         "wait_timeout": 1200,
         "poll_interval": 30,
         "output_dir": "reports/yuque",
         "raw_output_dir": "artifacts/raw",
+        "resume_state": "artifacts/state/jms-host-ip-check-inflight.json",
         "retention_count": 12,
         "query": "",
         "max_assets": None,
@@ -36,7 +39,16 @@ def test_run_workflow_success(monkeypatch, tmp_path):
     }
     (tmp_path / "latest.md").write_text("# report", encoding="utf-8")
     monkeypatch.setattr(weekly, "run_detect_subprocess", lambda args, timeout: detect)
-    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
+    monkeypatch.setattr(
+        weekly,
+        "load_runtime_env",
+        lambda profile, env_file: type("Env", (), {"env_file": "configs/profiles/prod.env", "loaded_files": ["prod.env"]})(),
+    )
+    monkeypatch.setattr(
+        weekly.preflight_check,
+        "validate_config",
+        lambda require_wecom=False, profile="default", env_file="": {"ok": True, "errors": []},
+    )
     monkeypatch.setattr(
         weekly.yuque_markdown_sync,
         "sync_markdown",
@@ -45,9 +57,11 @@ def test_run_workflow_success(monkeypatch, tmp_path):
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
 
-    record = weekly.run_workflow(make_args())
+    record = weekly.run_workflow(make_args(profile="prod", env_file="configs/profiles/prod.env"))
 
     assert record["status"] == "success"
+    assert record["profile"] == "prod"
+    assert record["env_file"] == "configs/profiles/prod.env"
     assert record["yuque"]["url"].endswith("/doc")
     assert record["wecom"]["status"] == "sent"
 
@@ -58,7 +72,8 @@ def test_run_workflow_detect_failure_still_notifies(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", fail_detect)
-    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
+    monkeypatch.setattr(weekly, "load_runtime_env", lambda profile, env_file: type("Env", (), {"env_file": "", "loaded_files": []})())
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False, profile="default", env_file="": {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
 
@@ -75,7 +90,8 @@ def test_run_workflow_timeout_notifies_timeout(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", timeout)
-    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
+    monkeypatch.setattr(weekly, "load_runtime_env", lambda profile, env_file: type("Env", (), {"env_file": "", "loaded_files": []})())
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False, profile="default", env_file="": {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
 
@@ -95,7 +111,8 @@ def test_run_workflow_yuque_failure_notifies_failure(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(weekly, "run_detect_subprocess", lambda args, timeout: detect)
-    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": True, "errors": []})
+    monkeypatch.setattr(weekly, "load_runtime_env", lambda profile, env_file: type("Env", (), {"env_file": "", "loaded_files": []})())
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False, profile="default", env_file="": {"ok": True, "errors": []})
     monkeypatch.setattr(weekly.yuque_markdown_sync, "sync_markdown", fail_sync)
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
@@ -112,7 +129,8 @@ def test_run_workflow_preflight_failure_does_not_detect(monkeypatch, tmp_path):
         raise AssertionError("detect should not run")
 
     calls = []
-    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False: {"ok": False, "errors": ["missing"]})
+    monkeypatch.setattr(weekly, "load_runtime_env", lambda profile, env_file: type("Env", (), {"env_file": "", "loaded_files": []})())
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False, profile="default", env_file="": {"ok": False, "errors": ["missing"]})
     monkeypatch.setattr(weekly, "run_detect_subprocess", should_not_run)
     monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: calls.append(kwargs) or {"status": "sent"})
     monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
@@ -154,3 +172,31 @@ def test_run_detect_subprocess_timeout_kills_process(monkeypatch):
         raise AssertionError("expected TimeoutError")
 
     assert process.killed is True
+
+
+def test_run_detect_subprocess_passes_profile_resume_state(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return '{"summary": {}, "paths": {}, "status_counts": {}}', ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(weekly.subprocess, "Popen", fake_popen)
+
+    weekly.run_detect_subprocess(
+        make_args(profile="prod", resume_state="artifacts/state/prod/jms-host-ip-check-inflight.json"),
+        timeout_seconds=1,
+    )
+
+    command = captured["command"]
+    assert "--resume-state" in command
+    assert command[command.index("--resume-state") + 1] == "artifacts/state/prod/jms-host-ip-check-inflight.json"

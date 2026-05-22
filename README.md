@@ -51,6 +51,46 @@ CHECK_OUTPUT_DIR=reports/yuque
 
 `.env` 已被 `.gitignore` 忽略，不要提交 Access Key。
 
+## 多环境配置
+
+多套 JumpServer 不需要复制项目。每套环境使用一个 profile env：
+
+```text
+configs/profiles/prod.env
+configs/profiles/test.env
+```
+
+可以从 `configs/profiles/example.env.example` 复制。`configs/profiles/*.env` 已被忽略，不会提交密钥。项目根目录 `.env` 可放共享默认值，profile env 中的同名配置会覆盖它。
+
+单环境巡检：
+
+```powershell
+python scripts/run_weekly_check.py --profile prod --no-proxy --require-wecom
+```
+
+显式指定配置文件：
+
+```powershell
+python scripts/run_weekly_check.py --profile prod --env-file configs/profiles/prod.env --no-proxy
+```
+
+多环境并发巡检：
+
+```powershell
+python scripts/run_multi_check.py --profiles prod,test,pre --parallel 3 --no-proxy --require-wecom
+```
+
+每个 profile 默认使用独立输出目录：
+
+```text
+reports/yuque/<profile>/
+artifacts/raw/<profile>/
+artifacts/state/<profile>/jms-host-ip-check-inflight.json
+artifacts/workflow/<profile>/
+```
+
+语雀也按 profile 区分。每个 profile env 可单独配置 `YUQUE_REPO_NAMESPACE`、`YUQUE_TARGET_TOC_UUID` 或 `YUQUE_SIBLING_URL`，因此可以分布到不同知识库或不同目录。未显式配置标题和 slug 时，默认会自动带 profile，例如 `JumpServer 主机探测与 IP 配置检测报告 - prod`、`jumpserver-host-ip-check-prod-YYYYMMDD-HHMMSS`。
+
 ## 常用命令
 
 每周全流程巡检、同步语雀并推送企业微信：
@@ -75,6 +115,12 @@ python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --d
 
 ```powershell
 python scripts/preflight_check.py --json
+```
+
+检查指定 profile：
+
+```powershell
+python scripts/preflight_check.py --profile prod --require-wecom --json
 ```
 
 企业微信默认可不配置；如果希望定时任务强制要求企业微信 Webhook：
@@ -174,9 +220,15 @@ Linux crontab 示例：
 0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python scripts/run_weekly_check.py --no-proxy >> logs/weekly-check.log 2>&1
 ```
 
+多环境 crontab 示例：
+
+```cron
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check-all.lock python3 scripts/run_multi_check.py --profiles prod,test --parallel 2 --no-proxy --require-wecom >> logs/weekly-check.log 2>&1
+```
+
 ## 输出
 
-默认输出目录：
+默认 profile 兼容原输出目录：
 
 ```text
 reports/yuque/
@@ -189,6 +241,8 @@ artifacts/workflow/
 artifacts/state/
   jms-host-ip-check-inflight.json
 ```
+
+非 default profile 会自动隔离到 `<profile>` 子目录，见上方“多环境配置”。
 
 后续知识库同步脚本可以优先扫描或同步 `reports/yuque/jumpserver-host-ip-check-latest.md`，文档 slug 建议使用 `jumpserver-host-ip-check`。
 
