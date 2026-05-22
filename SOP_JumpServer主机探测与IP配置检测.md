@@ -29,7 +29,7 @@
 
 ### 1.1 目标
 
-通过 JumpServer 的 REST API 和 Ops API，对纳管主机执行自动化批量检测，同时完成以下两项核查：
+通过 JumpServer 的 REST API 和 Ops API，对纳管主机执行自动化批量检测，生成 Markdown/JSON 报告，同步到语雀，并推送企业微信通知，同时完成以下两项核查：
 
 - **连通性检测**：判断主机是否可正常通过 JumpServer 建立 SSH 连接。
 - **IP 配置类型检测**：判断主机当前使用的是固定 IP（static）还是动态分配（DHCP），识别存在网段隐患的主机。
@@ -42,6 +42,7 @@
 | 排除主机 | OS 类型为 Windows 的资产（在报告中单独列出，不做探测） |
 | 触发方式 | 定时执行（建议每周一次）或运维手动触发 |
 | 所需权限 | JumpServer API Key（需有资产读权限 + Ops 执行权限） |
+| 报告流向 | 本地 `reports/yuque/` + 语雀时间戳文档 + 企业微信摘要 |
 
 
 ### 1.3 流程图
@@ -50,12 +51,14 @@
 初始化鉴权
   -> 拉取活跃资产
   -> 跳过 Windows 资产
-  -> Linux / 非 Windows 资产逐台创建 Ops job（有界并发）
+  -> 当前账号已授权 Linux / 非 Windows 资产一次提交 Ops job
   -> 创建 JumpServer Ops 作业
   -> 轮询任务状态
-  -> 获取执行日志
+  -> 分页获取完整执行日志
   -> 解析并分类
   -> 生成 Markdown / JSON 报告
+  -> 同步语雀文档
+  -> 推送企业微信执行摘要
 ```
 
 ---
@@ -98,7 +101,7 @@
     ├─ Windows → 跳过，加入"已排除"列表
     │
     ▼
-按单资产 job 有界并发
+按授权资产 all-in-one 批量提交
     │
     ▼
 构造复合 Shell 命令
@@ -108,7 +111,7 @@
 POST /api/v1/ops/jobs/  →  获取 task_id
     │
     ▼
-轮询 Task 状态（本地最长等待 60s）
+轮询 Task 状态（本地最长等待 1200s）
     │
     ├─ FAILURE / 超时 → 记录"探测失败"，不重试本批（等下一轮）
     │
@@ -124,7 +127,7 @@ SUCCESS → 按主机解析输出
 连续 2 次不可达 → 触发禁用 / 通知
     │
     ▼
-汇总所有批次结果 → 生成报告
+汇总所有结果 → 生成报告 → 同步语雀 → 企业微信通知
 ```
 
 ---
@@ -165,12 +168,14 @@ GET /api/v1/users/profile/
 | `base_url` | JumpServer 地址，如 `https://jumpserver.example.com` |
 | `api_token` | API Key |
 | `system_user_id` | 执行 Ops 任务使用的系统用户 ID |
-| `execution_mode` | 执行模式，准确报告使用 `single` |
-| `concurrency` | 单资产 job 并发数，建议 8–12 |
+| `execution_mode` | 执行模式，默认 `batch` |
+| `batch_size` | 默认 `0`，表示当前账号已授权资产全量一次提交 |
 | `task_timeout` | JumpServer job timeout，建议 `-1` 对齐 Web 控制台 |
-| `wait_timeout` | 本地轮询等待超时，建议 60s |
-| `poll_interval` | 轮询间隔，建议 3s |
+| `wait_timeout` | 本地轮询等待超时，建议 1200s |
+| `poll_interval` | 轮询间隔，建议 30s |
 | `report_path` | 报告输出路径 |
+| `yuque_*` | 语雀同步 token、repo、目录配置 |
+| `wecom_webhook_url` | 企业微信机器人 Webhook |
 
 ---
 
@@ -186,6 +191,16 @@ GET /api/v1/assets/assets/
 ```
 
 采用分页方式拉取，直到 `next` 字段为 null。
+
+同时拉取当前账号授权资产：
+
+```
+GET /api/v1/perms/users/self/assets/
+    ?limit=100
+    &offset=0
+```
+
+全量资产作为报告总口径；未出现在授权资产中的主机不提交 Ops，报告中标记为 `permission_denied`。
 
 ### 5.2 关键字段
 
@@ -351,6 +366,18 @@ Task 完成后，通过以下接口获取作业日志：
 GET /api/v1/ops/ansible/job-execution/{task_id}/log/
 ```
 
+该接口是分页/流式日志接口。响应包含：
+
+```json
+{
+  "data": "...",
+  "end": false,
+  "mark": "next-page-mark"
+}
+```
+
+必须在 `end=false` 时继续携带 `mark` 查询下一页，直到 `end=true`。只读取第一页会导致大量已成功主机没有日志分段，从而被误判为 `unreachable`。
+
 批量日志解析会先按原始主机标签精确匹配，再使用规范化标签匹配：
 
 - 空格与下划线差异，例如资产名 `192.168.101.121_netty Redis Cluster` 对应日志标签 `192.168.101.121_netty_Redis_Cluster`。
@@ -445,6 +472,14 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 
 报告文件命名格式：`jumpserver-host-ip-check-YYYYMMDD-HHMMSS.md`，同时写入 `jumpserver-host-ip-check-latest.md` 和原始 JSON 记录。
 
+全流程编排还会写入：
+
+```text
+artifacts/workflow/weekly-workflow-YYYYMMDD-HHMMSS.json
+```
+
+该文件记录探测结果、语雀同步结果、企业微信通知结果和失败原因，便于定时任务审计。
+
 报告包含以下字段：
 
 | 字段 | 说明 |
@@ -488,6 +523,45 @@ Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主�
 - 建议保留最近 12 次报告（约 3 个月，按每周执行计）。
 - 超过保留期的历史报告自动归档或删除。
 
+### 10.4 语雀同步
+
+语雀同步使用项目内置脚本：
+
+```bash
+python scripts/yuque_markdown_sync.py reports/yuque/jumpserver-host-ip-check-latest.md \
+  --slug jumpserver-host-ip-check \
+  --audit-timestamp
+```
+
+`--audit-timestamp` 会从报告中的探测开始时间生成标题和 slug，例如：
+
+```text
+JumpServer 主机探测与 IP 配置检测报告 2026-05-21 18:47:45
+jumpserver-host-ip-check-20260521-184745
+```
+
+这样每周定时任务都会创建或更新独立的时间戳文档，不覆盖历史审计记录。
+
+### 10.5 企业微信通知
+
+企业微信通知使用项目内置脚本：
+
+```bash
+python scripts/wecom_notify.py --status success --title "JumpServer 每周主机巡检"
+```
+
+通知包含执行状态、耗时、关键分类数量、语雀链接和本地报告路径。`WECOM_WEBHOOK_URL` 未配置时通知跳过，不影响探测和语雀同步；配置后推送失败会写入工作流记录。
+
+### 10.6 定时任务
+
+推荐每周一上午执行，并使用 `flock` 防止上次巡检未结束时重复启动：
+
+```cron
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python scripts/run_weekly_check.py --no-proxy >> logs/weekly-check.log 2>&1
+```
+
+默认总流程超时 1200 秒。超时、失败、成功都会尝试推送企业微信通知。
+
 ---
 
 ## 11. 异常处理规范
@@ -521,6 +595,17 @@ Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主�
 - 建议此时暂停新批次下发，等待已有任务处理完毕。
 - 可通过减小 `batch_size` 或降低并发批次数来缓解。
 
+### 11.5 全流程失败处理
+
+| 阶段 | 失败表现 | 处理方式 |
+|------|----------|----------|
+| JumpServer 鉴权 | `validate-auth` 失败 | 终止流程，企业微信推送失败 |
+| Ops 执行 | 超过 1200s | 终止本次等待，企业微信推送超时 |
+| 日志拉取 | 无法拉到 `end=true` | 记录 `probe_timeout` 或解析异常，不伪造成功 |
+| 语雀同步 | API 失败或配置缺失 | 流程标记失败，企业微信推送失败摘要 |
+| 企业微信通知 | Webhook 未配置 | 记录 skipped，不影响主流程状态 |
+| 企业微信通知 | Webhook 返回错误 | 记录通知失败，不覆盖探测/语雀原始状态 |
+
 ---
 
 ## 12. 配置参数参考
@@ -548,12 +633,14 @@ report:
   format: "csv"           # csv 或 json
 
 notification:
-  webhook_url: "${NOTIFY_WEBHOOK}"
-  email_to: ["ops@example.com"]
-  notify_on:
-    - unreachable_consecutive
-    - warn_dhcp
-    - ip_mismatch
+  wecom_webhook_url: "${WECOM_WEBHOOK_URL}"
+  notify_on: always
+
+yuque:
+  token: "${YUQUE_TOKEN}"
+  repo_namespace: "vurq8u/tiatz9"
+  slug: "jumpserver-host-ip-check"
+  audit_timestamp: true
 ```
 
 ---
