@@ -15,6 +15,21 @@ from urllib import error, request
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATUS_COUNT_LABELS = {
+    "ok_static": "静态IP正常",
+    "warn_dhcp": "DHCP告警",
+    "manual_check": "需人工复核",
+    "ip_mismatch": "IP不匹配",
+    "duplicate_asset": "重复资产",
+    "unreachable": "不可达",
+    "probe_timeout": "探测超时",
+    "ops_no_output": "Ops无输出",
+    "ops_module_error": "Ops模块错误",
+    "permission_denied": "未授权",
+    "no_account": "无账号",
+    "parse_error": "解析失败",
+    "skipped_windows": "跳过Windows",
+}
 
 
 def load_dotenv() -> None:
@@ -51,6 +66,10 @@ def load_summary(summary_json: str) -> dict[str, Any]:
 def status_label(status: str) -> str:
     labels = {"success": "成功", "failed": "失败", "timeout": "超时"}
     return labels.get(status, status)
+
+
+def status_count_label(key: str) -> str:
+    return STATUS_COUNT_LABELS.get(key, key)
 
 
 def build_markdown_message(
@@ -91,7 +110,9 @@ def build_markdown_message(
             "parse_error",
             "skipped_windows",
         ]
-        count_text = "，".join(f"{key}: {status_counts.get(key, 0)}" for key in ordered if status_counts.get(key, 0))
+        count_text = "，".join(
+            f"{status_count_label(key)}: {status_counts.get(key, 0)}" for key in ordered if status_counts.get(key, 0)
+        )
         lines.extend(["", f"- 分类：{count_text or '无异常分类'}"])
     if yuque_url:
         lines.append(f"- 语雀：[{yuque_url}]({yuque_url})")
@@ -152,7 +173,7 @@ def build_relay_message(
             value for key, value in status_counts.items() if key != "ok_static" and isinstance(value, int)
         )
         issue_counts = [(key, value) for key, value in ordered_status_counts(status_counts) if key != "ok_static"]
-        issue_text = "，".join(f"{key}: {value}" for key, value in issue_counts) or "无"
+        issue_text = "，".join(f"{status_count_label(key)}: {value}" for key, value in issue_counts) or "无"
         lines.extend([f"**概览**：正常 {ok_count} / 需关注 {attention_count}", f"**问题分类**：{issue_text}"])
     if yuque_url:
         lines.append(f"[查看语雀报告]({yuque_url})")

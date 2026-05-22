@@ -53,8 +53,8 @@ def test_build_markdown_message_includes_summary_and_links():
 
     assert "成功" in message
     assert "活跃资产：353" in message
-    assert "ok_static: 222" in message
-    assert "unreachable: 78" in message
+    assert "静态IP正常: 222" in message
+    assert "不可达: 78" in message
     assert "https://www.yuque.com/a/b/c" in message
     assert "reports/yuque/latest.md" in message
 
@@ -103,7 +103,7 @@ def test_build_relay_message_is_brief_and_linked():
     assert "**状态**：成功（耗时 668.6s）" in message
     assert "**资产**：活跃 353 / 探测 344 / 未授权 9" in message
     assert "**概览**：正常 222 / 需关注 119" in message
-    assert "**问题分类**：warn_dhcp: 1，duplicate_asset: 40，unreachable: 78" in message
+    assert "**问题分类**：DHCP告警: 1，重复资产: 40，不可达: 78" in message
     assert "[查看语雀报告](https://www.yuque.com/vurq8u/tiatz9/doc)" in message
 
 
