@@ -100,6 +100,79 @@ def build_markdown_message(
     return "\n".join(lines)
 
 
+def ordered_status_counts(status_counts: dict[str, Any]) -> list[tuple[str, int]]:
+    ordered = [
+        "ok_static",
+        "warn_dhcp",
+        "manual_check",
+        "ip_mismatch",
+        "duplicate_asset",
+        "unreachable",
+        "probe_timeout",
+        "ops_no_output",
+        "ops_module_error",
+        "permission_denied",
+        "no_account",
+        "parse_error",
+        "skipped_windows",
+    ]
+    result: list[tuple[str, int]] = []
+    for key in ordered:
+        value = status_counts.get(key, 0)
+        if isinstance(value, int) and value:
+            result.append((key, value))
+    return result
+
+
+def build_relay_message(
+    status: str,
+    summary: dict[str, Any] | None = None,
+    yuque_url: str = "",
+    error_message: str = "",
+    duration_seconds: float | None = None,
+) -> str:
+    summary = summary or {}
+    status_counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), dict) else {}
+    run_summary = summary.get("summary") if isinstance(summary.get("summary"), dict) else summary
+
+    status_text = f"**状态**：{status_label(status)}"
+    if duration_seconds is not None:
+        status_text += f"（耗时 {duration_seconds:.1f}s）"
+    lines = [status_text]
+    if error_message:
+        lines.append(f"**错误**：{error_message}")
+    if run_summary:
+        total_assets = run_summary.get("total_assets", "")
+        linux_assets = run_summary.get("linux_assets", "")
+        unauthorized = run_summary.get("unauthorized_assets", "")
+        lines.append(f"**资产**：活跃 {total_assets} / 探测 {linux_assets} / 未授权 {unauthorized}")
+    if status_counts:
+        ok_count = status_counts.get("ok_static", 0) if isinstance(status_counts.get("ok_static", 0), int) else 0
+        attention_count = sum(
+            value for key, value in status_counts.items() if key != "ok_static" and isinstance(value, int)
+        )
+        issue_counts = [(key, value) for key, value in ordered_status_counts(status_counts) if key != "ok_static"]
+        issue_text = "，".join(f"{key}: {value}" for key, value in issue_counts) or "无"
+        lines.extend([f"**概览**：正常 {ok_count} / 需关注 {attention_count}", f"**问题分类**：{issue_text}"])
+    if yuque_url:
+        lines.append(f"[查看语雀报告]({yuque_url})")
+    return "\n\n".join(lines)
+
+
+def build_alert_summary(status: str, summary: dict[str, Any] | None = None) -> str:
+    summary = summary or {}
+    run_summary = summary.get("summary") if isinstance(summary.get("summary"), dict) else summary
+    status_counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), dict) else {}
+    parts = [status_label(status)]
+    if run_summary.get("total_assets"):
+        parts.append(f"资产 {run_summary.get('total_assets')}")
+    if status_counts.get("unreachable"):
+        parts.append(f"不可达 {status_counts.get('unreachable')}")
+    if status_counts.get("duplicate_asset"):
+        parts.append(f"重复 {status_counts.get('duplicate_asset')}")
+    return " / ".join(parts)
+
+
 def strip_markdown(content: str) -> str:
     text = content.replace("**", "").replace("`", "")
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
@@ -112,7 +185,7 @@ def strip_markdown(content: str) -> str:
     return "\n".join(cleaned).strip()
 
 
-def build_alertmanager_payload(title: str, content: str, status: str) -> dict[str, Any]:
+def build_alertmanager_payload(title: str, content: str, status: str, alert_summary: str = "") -> dict[str, Any]:
     now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
     alert_status = "firing"
     return {
@@ -128,8 +201,8 @@ def build_alertmanager_payload(title: str, content: str, status: str) -> dict[st
                     "instance": "jumpserver-check",
                 },
                 "annotations": {
-                    "summary": title,
-                    "description": strip_markdown(content),
+                    "summary": alert_summary or title,
+                    "description": content,
                     "started_at": now.replace("T", " "),
                 },
             }
@@ -137,10 +210,16 @@ def build_alertmanager_payload(title: str, content: str, status: str) -> dict[st
     }
 
 
-def build_wecom_payload(channel: str, title: str, content: str, status: str = "success") -> dict[str, Any]:
+def build_wecom_payload(
+    channel: str,
+    title: str,
+    content: str,
+    status: str = "success",
+    alert_summary: str = "",
+) -> dict[str, Any]:
     normalized = channel.strip().lower() or "wecom"
     if normalized in {"wecom_relay", "relay", "alertmanager"}:
-        return build_alertmanager_payload(title, content, status)
+        return build_alertmanager_payload(title, content, status, alert_summary)
     if normalized in {"wecom_text", "text"}:
         return {"msgtype": "text", "text": {"content": strip_markdown(content)}}
     return {"msgtype": "markdown", "markdown": {"content": content}}
@@ -176,10 +255,15 @@ def notify(
 ) -> dict[str, Any]:
     load_dotenv()
     summary = load_summary(summary_json)
-    content = build_markdown_message(status, title, summary, report_path, yuque_url, error_message, duration_seconds)
     webhook_url = os.getenv("WECOM_WEBHOOK_URL", "").strip()
     channel = channel or os.getenv("WECOM_CHANNEL", "wecom")
-    payload = build_wecom_payload(channel, title, content, status)
+    normalized_channel = channel.strip().lower() or "wecom"
+    if normalized_channel in {"wecom_relay", "relay", "alertmanager"}:
+        content = build_relay_message(status, summary, yuque_url, error_message, duration_seconds)
+        payload = build_wecom_payload(channel, title, content, status, build_alert_summary(status, summary))
+    else:
+        content = build_markdown_message(status, title, summary, report_path, yuque_url, error_message, duration_seconds)
+        payload = build_wecom_payload(channel, title, content, status)
     if dry_run:
         result = {"status": "dry_run", "configured": bool(webhook_url), "channel": channel, "payload": payload, "content": content}
         print(json.dumps(result, ensure_ascii=False, indent=2))

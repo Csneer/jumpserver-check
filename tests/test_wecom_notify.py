@@ -72,12 +72,62 @@ def test_build_wecom_payload_supports_text_channel():
 
 
 def test_build_wecom_payload_supports_relay_channel():
-    payload = notify.build_wecom_payload("wecom_relay", "JumpServer 每周主机巡检", "**状态**：成功", "success")
+    payload = notify.build_wecom_payload("wecom_relay", "JumpServer 每周主机巡检", "**状态**：成功", "success", "成功 / 资产 353")
 
     assert payload["status"] == "firing"
     assert payload["alerts"][0]["labels"]["source"] == "jumpserver-check"
-    assert payload["alerts"][0]["annotations"]["summary"] == "JumpServer 每周主机巡检"
-    assert payload["alerts"][0]["annotations"]["description"] == "状态：成功"
+    assert payload["alerts"][0]["annotations"]["summary"] == "成功 / 资产 353"
+    assert payload["alerts"][0]["annotations"]["description"] == "**状态**：成功"
+
+
+def test_build_relay_message_is_brief_and_linked():
+    summary = {
+        "summary": {"total_assets": 353, "linux_assets": 344, "unauthorized_assets": 9},
+        "status_counts": {
+            "ok_static": 222,
+            "warn_dhcp": 1,
+            "duplicate_asset": 40,
+            "unreachable": 78,
+        },
+    }
+
+    message = notify.build_relay_message(
+        "success",
+        summary,
+        yuque_url="https://www.yuque.com/vurq8u/tiatz9/doc",
+        duration_seconds=668.6,
+    )
+
+    assert "JumpServer 每周主机巡检" not in message
+    assert "本地报告" not in message
+    assert "**状态**：成功（耗时 668.6s）" in message
+    assert "**资产**：活跃 353 / 探测 344 / 未授权 9" in message
+    assert "**概览**：正常 222 / 需关注 119" in message
+    assert "**问题分类**：warn_dhcp: 1，duplicate_asset: 40，unreachable: 78" in message
+    assert "[查看语雀报告](https://www.yuque.com/vurq8u/tiatz9/doc)" in message
+
+
+def test_notify_relay_payload_omits_local_report(monkeypatch):
+    summary = {
+        "summary": {"total_assets": 353, "linux_assets": 344, "unauthorized_assets": 9},
+        "status_counts": {"ok_static": 222, "unreachable": 78},
+    }
+
+    result = notify.notify(
+        "success",
+        "JumpServer 每周主机巡检",
+        summary_json=json.dumps(summary),
+        report_path="reports/yuque/latest.md",
+        yuque_url="https://www.yuque.com/vurq8u/tiatz9/doc",
+        duration_seconds=668.6,
+        channel="wecom_relay",
+        dry_run=True,
+    )
+
+    description = result["payload"]["alerts"][0]["annotations"]["description"]
+    assert "本地报告" not in description
+    assert "reports/yuque/latest.md" not in description
+    assert "[查看语雀报告](https://www.yuque.com/vurq8u/tiatz9/doc)" in description
 
 
 def test_notify_skips_when_webhook_missing(monkeypatch):
