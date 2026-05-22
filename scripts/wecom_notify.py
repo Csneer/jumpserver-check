@@ -32,9 +32,17 @@ def load_dotenv() -> None:
 def load_summary(summary_json: str) -> dict[str, Any]:
     if not summary_json:
         return {}
-    path = Path(summary_json)
-    text = path.read_text(encoding="utf-8") if path.exists() else summary_json
-    payload = json.loads(text)
+    source = summary_json.strip()
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as json_error:
+        try:
+            path = Path(source)
+            if not path.is_file():
+                raise ValueError("--summary-json 必须是 JSON 字符串或可读取的 JSON 文件路径") from json_error
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as path_error:
+            raise ValueError("--summary-json 必须是 JSON 字符串或可读取的 JSON 文件路径") from path_error
     return payload if isinstance(payload, dict) else {}
 
 

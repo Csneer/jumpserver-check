@@ -5,6 +5,29 @@ import pytest
 from scripts import wecom_notify as notify
 
 
+def test_load_summary_prefers_inline_json_over_path_checks():
+    payload = {
+        "summary": {"total_assets": 353},
+        "status_counts": {"ok_static": 222},
+        "paths": {"report": "reports/yuque/jumpserver-host-ip-check.md"},
+    }
+    large_inline_json = json.dumps(payload) + (" " * 5000)
+
+    assert notify.load_summary(large_inline_json) == payload
+
+
+def test_load_summary_reads_json_file(tmp_path):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(json.dumps({"status_counts": {"unreachable": 1}}), encoding="utf-8")
+
+    assert notify.load_summary(str(summary_path)) == {"status_counts": {"unreachable": 1}}
+
+
+def test_load_summary_rejects_invalid_source():
+    with pytest.raises(ValueError, match="JSON 字符串或可读取的 JSON 文件路径"):
+        notify.load_summary("not json and not a file")
+
+
 def test_build_markdown_message_includes_summary_and_links():
     summary = {
         "summary": {"total_assets": 353, "linux_assets": 344, "unauthorized_assets": 9},
