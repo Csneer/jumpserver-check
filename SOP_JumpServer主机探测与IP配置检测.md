@@ -367,6 +367,8 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 轮询默认 30 秒一次。任务完成后优先读取 task summary 中的 `dark`、`failures`、`excludes`，再结合日志分段解析每台主机的 `DETECT_START/DETECT_END` 输出，避免明确的连接失败、无账号或模块失败被误判为无输出。
 
+全量 `batch --batch-size 0` 默认启用本地接续：Ops job 创建成功后，脚本会立即写入 `artifacts/state/jms-host-ip-check-inflight.json`，记录 `task_id`、资产快照、命令签名和参数签名。如果本地进程中断但任务已经提交到 JumpServer，下次执行会先检查该状态文件；只要状态未标记为 `parsed` 且签名一致，就直接轮询旧 `task_id` 并解析日志，不重复创建 job。需要强制新建任务时，使用 `--no-resume`。
+
 ---
 
 ## 8. 阶段五：解析输出与分类
@@ -492,6 +494,14 @@ artifacts/workflow/weekly-workflow-YYYYMMDD-HHMMSS.json
 ```
 
 该文件记录探测结果、语雀同步结果、企业微信通知结果和失败原因，便于定时任务审计。
+
+接续状态文件：
+
+```text
+artifacts/state/jms-host-ip-check-inflight.json
+```
+
+报告成功生成后，状态会更新为 `parsed` 并记录报告路径。若要废弃旧 JumpServer job，可删除该状态文件或使用 `--no-resume`。
 
 报告包含以下字段：
 

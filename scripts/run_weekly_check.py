@@ -75,6 +75,8 @@ def run_detect_subprocess(args: argparse.Namespace, timeout_seconds: int) -> dic
             str(args.retention_count),
         ]
     )
+    if args.no_resume:
+        command.append("--no-resume")
     if args.query:
         command.extend(["--query", args.query])
     if args.max_assets is not None:
@@ -233,6 +235,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
     parser.add_argument("--require-wecom", action="store_true", help="强制要求 WECOM_WEBHOOK_URL 已配置")
+    parser.add_argument("--no-resume", action="store_true", help="不接续未解析的 JumpServer Ops job，强制新建任务")
     return parser.parse_args()
 
 

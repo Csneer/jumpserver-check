@@ -123,6 +123,39 @@ def test_fetch_full_job_log_follows_marks():
     assert pages[-1]["end"] is True
 
 
+def test_run_batch_writes_resume_state(tmp_path: Path):
+    class Client:
+        def post(self, path, body):
+            return 201, {"task_id": "task-1"}
+
+        def get(self, path, params=None):
+            if "task-detail" in path:
+                return 200, {"status": "success", "is_finished": True, "is_success": True, "summary": {}}
+            if "log" in path:
+                return 200, {"data": "host-a | CHANGED | rc=0 >>\nDETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10\nIF_NAME=eth0\nDETECT_END\n", "end": True, "mark": "m1"}
+            return 200, {}
+
+    state_path = tmp_path / "state.json"
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+
+    record = check.run_batch(Client(), [asset], 1, -1, 0, "root", 1, resume_state_path=state_path, signature="sig")
+
+    state = check.load_resume_state(state_path)
+    assert record["task_id"] == "task-1"
+    assert state["status"] == "submitted"
+    assert state["task_id"] == "task-1"
+    assert state["signature"] == "sig"
+    assert state["assets"][0]["id"] == "asset-1"
+
+
+def test_resume_signature_changes_with_command_or_assets():
+    asset_a = {"id": "asset-a"}
+    asset_b = {"id": "asset-b"}
+
+    assert check.resume_signature([asset_a], runas="root", timeout=-1) != check.resume_signature([asset_b], runas="root", timeout=-1)
+    assert check.resume_signature([asset_a], runas="root", timeout=-1) != check.resume_signature([asset_a], runas="admin", timeout=-1)
+
+
 def test_chunks_zero_means_all_in_one():
     items = [{"id": "asset-1"}, {"id": "asset-2"}]
 
@@ -407,3 +440,70 @@ def test_markdown_report_and_latest_written(tmp_path: Path):
     assert "batch" in content
     assert "## 异常主机" in content
     assert "## 全量明细" in content
+
+
+def test_run_detect_resumes_matching_state(monkeypatch, tmp_path: Path):
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "nodes": [{"id": "node-1"}]}
+    state_path = tmp_path / "resume.json"
+    signature = check.resume_signature([asset], runas="root", timeout=-1)
+    check.save_resume_state(
+        state_path,
+        {
+            "status": "submitted",
+            "task_id": "task-1",
+            "batch_index": 1,
+            "assets": [asset],
+            "signature": signature,
+        },
+    )
+
+    class Client:
+        def __init__(self, no_proxy=False):
+            pass
+
+        def post(self, path, body):
+            raise AssertionError("should not create a new job")
+
+        def get(self, path, params=None):
+            if "profile" in path:
+                return 200, {"id": "user"}
+            if "assets/assets" in path:
+                return 200, {"results": [asset], "next": None}
+            if "perms/users/self/assets" in path:
+                return 200, {"results": [asset], "next": None}
+            if "task-detail" in path:
+                return 200, {"status": "success", "is_finished": True, "is_success": True, "summary": {}}
+            if "log" in path:
+                return 200, {"data": "host-a | CHANGED | rc=0 >>\nDETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10\nIF_NAME=eth0\nDETECT_END\n", "end": True, "mark": "m1"}
+            return 200, {}
+
+    monkeypatch.setattr(check, "JumpServerClient", Client)
+    args = type(
+        "Args",
+        (),
+        {
+            "no_proxy": True,
+            "page_size": 100,
+            "query": None,
+            "max_assets": None,
+            "execution_mode": "batch",
+            "batch_size": 0,
+            "timeout": -1,
+            "poll_interval": 0,
+            "runas": "root",
+            "wait_timeout": 1,
+            "batch_gap": 0,
+            "concurrency": 1,
+            "output_dir": str(tmp_path / "reports"),
+            "raw_output_dir": str(tmp_path / "raw"),
+            "retention_count": 12,
+            "resume": True,
+            "resume_state": str(state_path),
+        },
+    )()
+
+    result = check.run_detect(args)
+    state = check.load_resume_state(state_path)
+
+    assert result["status_counts"] == {"ok_static": 1}
+    assert state["status"] == "parsed"

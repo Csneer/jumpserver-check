@@ -21,6 +21,7 @@ from urllib import error, parse, request
 
 DEFAULT_ORG = "00000000-0000-0000-0000-000000000002"
 DEFAULT_PAGE_SIZE = 100
+DEFAULT_RESUME_STATE = "artifacts/state/jms-host-ip-check-inflight.json"
 PROFILE_ENDPOINTS = (
     "/api/v1/users/profile/",
     "/api/v1/users/users/profile/",
@@ -470,6 +471,60 @@ def chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
+def stable_asset_snapshot(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": asset.get("id"),
+            "name": asset.get("name"),
+            "hostname": asset.get("hostname"),
+            "address": asset.get("address"),
+            "ip": asset.get("ip"),
+            "platform": asset.get("platform"),
+            "os": asset.get("os"),
+            "os_type": asset.get("os_type"),
+            "nodes": asset.get("nodes"),
+        }
+        for asset in assets
+    ]
+
+
+def resume_signature(assets: list[dict[str, Any]], *, runas: str, timeout: int) -> str:
+    payload = {
+        "asset_ids": [str(asset.get("id") or "") for asset in assets],
+        "runas": runas,
+        "timeout": timeout,
+        "command_sha256": hashlib.sha256(DETECTION_COMMAND.encode("utf-8")).hexdigest(),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def load_resume_state(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_resume_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def mark_resume_state(path: Path, status: str, paths: dict[str, str] | None = None) -> None:
+    state = load_resume_state(path) or {}
+    state["status"] = status
+    state["updated_at"] = dt.datetime.now().astimezone().isoformat()
+    if paths:
+        state["report_paths"] = paths
+    save_resume_state(path, state)
+
+
 def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreachable", remark: str = "", source: str = "batch") -> dict[str, Any]:
     return {
         "asset_id": asset.get("id"),
@@ -773,6 +828,8 @@ def run_batch(
     poll_interval: int,
     runas: str,
     wait_timeout: int,
+    resume_state_path: Path | None = None,
+    signature: str = "",
 ) -> dict[str, Any]:
     payload = build_ops_payload(batch, batch_index, timeout, runas=runas)
     create_status, created = client.post("/api/v1/ops/jobs/", payload)
@@ -789,13 +846,42 @@ def run_batch(
             classify_probe_result(asset, "", timed_out=True, remark=f"Ops 作业创建失败: HTTP {create_status}") for asset in batch
         ]
         return batch_record
+    if resume_state_path is not None:
+        save_resume_state(
+            resume_state_path,
+            {
+                "status": "submitted",
+                "created_at": dt.datetime.now().astimezone().isoformat(),
+                "updated_at": dt.datetime.now().astimezone().isoformat(),
+                "task_id": task_id,
+                "batch_index": batch_index,
+                "asset_count": len(batch),
+                "assets": stable_asset_snapshot(batch),
+                "signature": signature,
+                "runas": runas,
+                "timeout": timeout,
+                "execution_mode": "batch",
+                "batch_size": 0,
+            },
+        )
 
+    return collect_batch_result(client, batch, batch_record, task_id, poll_interval, wait_timeout)
+
+
+def collect_batch_result(
+    client: JumpServerClient,
+    batch: list[dict[str, Any]],
+    batch_record: dict[str, Any],
+    task_id: str,
+    poll_interval: int,
+    wait_timeout: int,
+) -> dict[str, Any]:
     deadline = time.time() + wait_timeout
     task: dict[str, Any] = {}
     while time.time() < deadline:
         task_status, task_payload = client.get(f"/api/v1/ops/job-execution/task-detail/{task_id}/")
         task = task_payload if isinstance(task_payload, dict) else {}
-        batch_record["polls"].append(
+        batch_record.setdefault("polls", []).append(
             {
                 "status": task_status,
                 "job_status": task.get("status"),
@@ -807,7 +893,6 @@ def run_batch(
         if task.get("is_finished") or str(task.get("status") or "").lower() in {"success", "failed"}:
             break
         time.sleep(poll_interval)
-
     finished = bool(task.get("is_finished")) or str(task.get("status") or "").lower() in {"success", "failed"}
     timed_out = not finished
     batch_record["task"] = {
@@ -1091,6 +1176,9 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
     results = [skipped_windows_result(asset) for asset in windows_assets]
     results.extend(permission_denied_result(asset) for asset in unauthorized_assets if not is_windows_asset(asset))
     batch_records = []
+    resume_state_path = Path(args.resume_state)
+    can_resume = args.resume and args.execution_mode == "batch" and args.batch_size == 0 and not args.query and args.max_assets is None
+    signature = resume_signature(linux_assets, runas=args.runas, timeout=args.timeout)
     if args.execution_mode == "single":
         results, batch_records = run_single_asset_jobs(
             results,
@@ -1107,12 +1195,45 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             linux_batches = chunks_by_primary_node(linux_assets, args.batch_size)
         else:
             linux_batches = chunks(linux_assets, args.batch_size)
-        for index, batch in enumerate(linux_batches, start=1):
-            batch_record = run_batch(client, batch, index, args.timeout, args.poll_interval, args.runas, args.wait_timeout)
-            batch_records.append(batch_record)
-            results.extend(batch_record.get("results", []))
-            if args.batch_gap > 0 and index < len(linux_batches):
-                time.sleep(args.batch_gap)
+        if can_resume:
+            state = load_resume_state(resume_state_path)
+            if state and state.get("status") != "parsed" and state.get("task_id") and state.get("signature") == signature:
+                batch = state.get("assets") if isinstance(state.get("assets"), list) else linux_assets
+                batch_record = {
+                    "batch_index": state.get("batch_index", 1),
+                    "asset_count": len(batch),
+                    "create_status": "resumed",
+                    "task_id": state["task_id"],
+                    "polls": [],
+                    "resumed": True,
+                }
+                batch_record = collect_batch_result(client, batch, batch_record, state["task_id"], args.poll_interval, args.wait_timeout)
+                batch_records.append(batch_record)
+                results.extend(batch_record.get("results", []))
+            else:
+                for index, batch in enumerate(linux_batches, start=1):
+                    batch_record = run_batch(
+                        client,
+                        batch,
+                        index,
+                        args.timeout,
+                        args.poll_interval,
+                        args.runas,
+                        args.wait_timeout,
+                        resume_state_path=resume_state_path if index == 1 and len(linux_batches) == 1 else None,
+                        signature=signature,
+                    )
+                    batch_records.append(batch_record)
+                    results.extend(batch_record.get("results", []))
+                    if args.batch_gap > 0 and index < len(linux_batches):
+                        time.sleep(args.batch_gap)
+        else:
+            for index, batch in enumerate(linux_batches, start=1):
+                batch_record = run_batch(client, batch, index, args.timeout, args.poll_interval, args.runas, args.wait_timeout)
+                batch_records.append(batch_record)
+                results.extend(batch_record.get("results", []))
+                if args.batch_gap > 0 and index < len(linux_batches):
+                    time.sleep(args.batch_gap)
     duplicates = duplicate_asset_map(assets)
     apply_duplicate_asset_annotations(results, duplicates)
     summary = {
@@ -1136,6 +1257,8 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         args.retention_count,
         summary,
     )
+    if can_resume and batch_records and all("results" in record for record in batch_records):
+        mark_resume_state(resume_state_path, "parsed", paths)
     return {"summary": summary, "paths": paths, "status_counts": dict(Counter(result["probe_status"] for result in results))}
 
 
@@ -1171,6 +1294,8 @@ def main() -> None:
     detect.add_argument("--raw-output-dir", default="artifacts/raw")
     detect.add_argument("--retention-count", type=int, default=12)
     detect.add_argument("--runas", default="root")
+    detect.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="resume an unparsed all-in-one batch Ops task when possible")
+    detect.add_argument("--resume-state", default=DEFAULT_RESUME_STATE, help="path to local inflight task state")
 
     args = parser.parse_args()
     if args.command == "validate-auth":

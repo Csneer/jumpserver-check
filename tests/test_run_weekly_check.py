@@ -22,6 +22,7 @@ def make_args(**overrides):
         "dry_run_yuque": False,
         "dry_run_notify": False,
         "require_wecom": False,
+        "no_resume": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)

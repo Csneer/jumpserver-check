@@ -58,6 +58,12 @@ CHECK_OUTPUT_DIR=reports/yuque
 python scripts/run_weekly_check.py --no-proxy
 ```
 
+全量批量探测默认支持中断接续：创建 JumpServer Ops job 后会把 `task_id` 写入 `artifacts/state/jms-host-ip-check-inflight.json`。如果本地脚本中断但 JumpServer job 仍在或已完成，下次运行会优先接续该任务并解析日志，不会重复提交新 job。需要强制新建任务时使用：
+
+```powershell
+python scripts/run_weekly_check.py --no-proxy --no-resume
+```
+
 全流程 dry-run 验证：
 
 ```powershell
@@ -177,6 +183,8 @@ artifacts/raw/
   jumpserver-host-ip-check-YYYYMMDD-HHMMSS.json
 artifacts/workflow/
   weekly-workflow-YYYYMMDD-HHMMSS.json
+artifacts/state/
+  jms-host-ip-check-inflight.json
 ```
 
 后续知识库同步脚本可以优先扫描或同步 `reports/yuque/jumpserver-host-ip-check-latest.md`，文档 slug 建议使用 `jumpserver-host-ip-check`。
