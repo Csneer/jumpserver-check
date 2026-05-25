@@ -13,7 +13,7 @@
 - 已通过 JumpServer Ops 作业下发只读 Shell 探测命令；默认使用全量一次批量 job，payload 携带资产 ID 和节点 ID，对齐 Web 控制台链路。
 - 已在执行前读取当前账号授权资产，未授权资产不提交 Ops，报告中标记为 `permission_denied`。
 - 已支持提取主机所有全局 IPv4 地址，并默认仅排除 Docker 默认 `172.17.*` 网桥地址，避免误过滤合法 `172.16.0.0/12` 内网主机 IP。
-- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`api_error`、`log_fetch_error`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`permission_denied`、`no_account`、`parse_error`、`probe_script_error`、`skipped_non_linux`、`skipped_windows`。
+- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`api_error`、`log_fetch_error`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`ops_task_failed`、`permission_denied`、`no_account`、`parse_error`、`probe_script_error`、`skipped_non_linux`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
 - 已内置语雀 Markdown 同步和企业微信 Markdown 通知脚本，不依赖外部 `yuqeu_sync` 目录。
 - 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入等单元测试。
@@ -252,7 +252,7 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 # JumpServer 主机探测与 IP 配置检测报告
 ```
 
-报告包含 `问题分类索引`、`异常主机`、`全量明细` 三块内容。`问题分类索引` 会按 `warn_dhcp`、`ip_mismatch`、`duplicate_asset`、`unreachable` 等状态给出简短主机列表，便于先定位问题类型；完整字段和全部记录仍在后面的明细表中。
+报告包含 `问题分类索引`、`异常主机`、`全量明细` 三块内容。`问题分类索引` 会按 `warn_dhcp`、`ip_mismatch`、`duplicate_asset`、`unreachable` 等状态给出简短主机列表，便于先定位问题类型；重复资产会同时保留原始异常状态，因此分类数量可能存在有意重叠，完整字段和全部记录仍在后面的明细表中。
 
 ## 分类
 
@@ -260,13 +260,14 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 - `warn_dhcp`：连通，但检测到 DHCP。
 - `manual_check`：连通，但无法自动判断 IP 类型。
 - `ip_mismatch`：实际 IP 与 JumpServer 资产 IP 不一致。
-- `duplicate_asset`：JumpServer 存在多条相同资产 IP 记录，优先作为历史遗留或重复录入问题标注。
+- `duplicate_asset`：JumpServer 存在多条相同资产 IP 记录，优先作为历史遗留或重复录入问题标注；原始探测状态仍会保留并参与异常分类汇总。
 - `unreachable`：Ops 返回连接失败或无主机输出。
 - `api_error`：JumpServer API 或 Ops job 创建/状态查询异常。
 - `log_fetch_error`：Ops 任务结束后日志接口失败或分页中断。
 - `probe_timeout`：批次任务创建失败或轮询超时。
 - `ops_no_output`：Ops 任务成功但没有返回主机输出，不等同于主机不可达。
 - `ops_module_error`：Ops/Ansible 模块执行异常。
+- `ops_task_failed`：JumpServer Ops 任务整体失败，报告不再按部分日志生成主机级结论。
 - `permission_denied`：当前 API/Ops 权限无法访问该资产。
 - `no_account`：JumpServer 未找到该资产可用登录账号。
 - `parse_error`：主机有输出，但缺少固定探测 marker。

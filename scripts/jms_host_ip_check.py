@@ -589,7 +589,10 @@ def apply_duplicate_asset_annotations(results: list[dict[str, Any]], duplicates:
         if not group:
             continue
         original_status = result.get("probe_status") or ""
+        original_remark = result.get("remark") or ""
         names = ", ".join(asset_name(asset) for asset in group)
+        result["original_probe_status"] = original_status
+        result["original_remark"] = original_remark
         result["probe_status"] = "duplicate_asset"
         detail = f"JumpServer 存在 {len(group)} 条相同资产 IP 记录，疑似历史遗留或重复录入：{names}"
         if original_status:
@@ -696,6 +699,13 @@ def skipped_non_linux_result(asset: dict[str, Any]) -> dict[str, Any]:
 
 def status_result(asset: dict[str, Any], status: str, remark: str, connectivity: str = "unknown") -> dict[str, Any]:
     return base_result(asset, status, connectivity=connectivity, remark=remark)
+
+
+def ops_task_failed_result(asset: dict[str, Any], task_id: str, summary_message: str = "") -> dict[str, Any]:
+    remark = f"Ops 任务整体失败，未按主机日志生成结论，task_id={task_id}"
+    if summary_message:
+        remark = f"{remark}；{summary_message}"
+    return status_result(asset, "ops_task_failed", remark)
 
 
 def build_ops_payload(batch: list[dict[str, Any]], batch_index: int, timeout: int, runas: str = "root") -> dict[str, Any]:
@@ -1109,6 +1119,11 @@ def collect_batch_result(
             classify_probe_result(asset, "", timed_out=True, remark=f"批次任务超时，task_id={task_id}") for asset in batch
         ]
         return batch_record
+    if task.get("is_success") is False or str(task.get("status") or "").lower() == "failed":
+        batch_record["results"] = [
+            ops_task_failed_result(asset, task_id, summary_message_for_asset(asset, task.get("summary"))) for asset in batch
+        ]
+        return batch_record
 
     log_status, log_text, log_pages = fetch_full_job_log(client, task_id)
     batch_record["log_status"] = log_status
@@ -1229,6 +1244,7 @@ PROBLEM_STATUSES = (
     "probe_timeout",
     "ops_no_output",
     "ops_module_error",
+    "ops_task_failed",
     "permission_denied",
     "no_account",
     "parse_error",
@@ -1240,7 +1256,7 @@ PROBLEM_STATUSES = (
 def issue_index_rows(results: list[dict[str, Any]], status: str, limit: int = 30) -> list[list[Any]]:
     rows = []
     for result in results:
-        if result.get("probe_status") != status:
+        if not result_matches_status(result, status):
             continue
         rows.append(
             [
@@ -1254,6 +1270,23 @@ def issue_index_rows(results: list[dict[str, Any]], status: str, limit: int = 30
         if len(rows) >= limit:
             break
     return rows
+
+
+def result_matches_status(result: dict[str, Any], status: str) -> bool:
+    if result.get("probe_status") == status:
+        return True
+    return result.get("probe_status") == "duplicate_asset" and result.get("original_probe_status") == status
+
+
+def probe_status_counts(results: list[dict[str, Any]]) -> Counter[str]:
+    counts = Counter(result["probe_status"] for result in results)
+    for result in results:
+        if result.get("probe_status") != "duplicate_asset":
+            continue
+        original_status = result.get("original_probe_status")
+        if original_status in PROBLEM_STATUSES and original_status != "duplicate_asset":
+            counts[str(original_status)] += 1
+    return counts
 
 
 def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str], limit: int = 30) -> list[str]:
@@ -1278,7 +1311,7 @@ def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str]
 
 
 def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime, finished_at: dt.datetime, summary: dict[str, Any]) -> str:
-    status_counts = Counter(result["probe_status"] for result in results)
+    status_counts = probe_status_counts(results)
     abnormal = [result for result in results if result.get("probe_status") not in {"ok_static"}]
     headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "探测状态", "节点", "探测来源", "备注"]
     lines = [
@@ -1308,6 +1341,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "probe_timeout",
             "ops_no_output",
             "ops_module_error",
+            "ops_task_failed",
             "permission_denied",
             "no_account",
             "parse_error",
@@ -1475,7 +1509,7 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
     )
     if can_resume and batch_records and all("results" in record for record in batch_records):
         mark_resume_state(resume_state_path, "parsed", paths)
-    return {"summary": summary, "paths": paths, "status_counts": dict(Counter(result["probe_status"] for result in results))}
+    return {"summary": summary, "paths": paths, "status_counts": dict(probe_status_counts(results))}
 
 
 def main() -> None:

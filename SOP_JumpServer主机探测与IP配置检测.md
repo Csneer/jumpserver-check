@@ -124,7 +124,7 @@ SUCCESS → 按主机解析输出
     └─ IP_TYPE=unknown          → 无法判断，人工核查
     │
     ▼
-连续 2 次不可达 → 触发禁用 / 通知
+不可达 / 异常主机 → 进入报告与通知
     │
     ▼
 汇总所有结果 → 生成报告 → 同步语雀 → 企业微信通知
@@ -350,7 +350,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 | `PENDING` | 等待中 | 继续等待 |
 | `STARTED` | 执行中 | 继续等待 |
 | `SUCCESS` | 执行完成 | 进入解析阶段 |
-| `FAILURE` | 任务失败 | 记录为"探测失败"，跳过本批 |
+| `FAILURE` | 任务失败 | 本批所有主机记录为 `ops_task_failed`，不解析部分日志 |
 
 ### 7.4 轮询超时处理
 
@@ -440,6 +440,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `probe_timeout` | 任务超时，未能探测 |
 | `ops_no_output` | Ops 任务成功但没有返回主机输出 |
 | `ops_module_error` | Ops/Ansible 模块执行异常 |
+| `ops_task_failed` | Ops 任务整体失败，不按部分日志生成主机级结论 |
 | `permission_denied` | 当前 API/Ops 权限无法访问该资产 |
 | `no_account` | JumpServer 未找到该资产可用登录账号 |
 | `parse_error` | 探测到主机但输出解析失败 |
@@ -449,22 +450,22 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 
 ## 9. 阶段六：结果处置
 
-### 9.1 不可达主机处置流程
+### 9.1 不可达主机处置建议
 
 ```
 单次探测 unreachable
     │
     ▼
-查询历史记录：该主机上次探测结果是否也为 unreachable？
+写入本次只读报告和企业微信摘要
     │
-    ├─ 否（首次失败）→ 仅记录，下次任务再确认
+    ▼
+由外部工单 / 告警系统结合历史报告判断是否连续失败
     │
-    └─ 是（连续 ≥ 2 次）→ 进入处置流程：
-         ├─ 发送告警通知（Webhook / 邮件）
-         └─ 可选：PATCH /api/v1/assets/assets/{id}/ is_active=false
+    ▼
+人工确认后再执行任何资产状态变更
 ```
 
-> ⚠️ **is_active 设为 false 属于不可逆破坏性操作，建议默认关闭，需运维人员手动确认后执行。**
+> ⚠️ 本项目不自动修改 JumpServer 资产状态，不自动禁用主机，不执行整改命令。连续失败判断、工单流转和资产状态变更应由外部运维流程在人工确认后完成。
 
 ### 9.2 DHCP 主机处置建议
 
@@ -480,7 +481,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 
 | 分类 | 建议通知方式 |
 |------|-------------|
-| `unreachable`（连续 2 次） | 即时告警：飞书/钉钉 Webhook |
+| `unreachable` | 汇总通知：企业微信摘要，连续失败由外部工单 / 告警系统判断 |
 | `warn_dhcp` | 汇总发送：邮件 / 运维工单系统 |
 | `ip_mismatch` | 汇总发送：邮件 |
 | `probe_timeout` | 汇总发送：邮件，标注需人工复查 |
@@ -524,10 +525,10 @@ artifacts/state/jms-host-ip-check-inflight.json
 | `connectivity` | ok / unreachable |
 | `probe_status` | ok_static / warn_dhcp / unreachable / probe_timeout 等 |
 | `probe_source` | batch / skipped |
-| `original_probe_status` | 保留字段，当前批量-only 链路为空 |
-| `original_remark` | 保留字段，当前批量-only 链路为空 |
+| `original_probe_status` | 重复资产覆盖主状态时保留原始探测状态 |
+| `original_remark` | 重复资产覆盖主状态时保留原始备注 |
 | `node` | 所属节点/分组 |
-| `remark` | 备注（如：连续 N 次失败） |
+| `remark` | 备注（如：重复资产、任务失败、日志异常原因） |
 
 Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主机列表；随后输出 `异常主机` 完整表和 `全量明细`。问题分类索引用于快速定位某类问题，完整排查仍以异常主机表和全量明细为准。
 
@@ -660,7 +661,7 @@ detection:
   wait_timeout: 1200      # 本地轮询等待超时（秒）
   poll_interval: 30       # 轮询间隔（秒）
   max_concurrent_batches: 3   # 最大并发批次数
-  consecutive_fail_threshold: 2  # 连续失败多少次触发处置
+  # 连续失败处置由外部工单 / 告警系统负责，本项目只输出只读报告
 
 report:
   output_dir: "./reports"
@@ -734,7 +735,7 @@ function detect_ip_type():
 当同一主机触发多个分类时，按以下优先级取最高级显示：
 
 ```
-unreachable  >  probe_timeout  >  ip_mismatch  >  warn_dhcp  >  manual_check  >  ok_static
+duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  unreachable  >  probe_timeout  >  ip_mismatch  >  warn_dhcp  >  manual_check  >  ok_static
 ```
 
 ### 附录 D：与现有项目复用建议

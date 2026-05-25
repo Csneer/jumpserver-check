@@ -76,7 +76,9 @@ def test_duplicate_asset_annotation_overrides_probe_status():
     check.apply_duplicate_asset_annotations(results, check.duplicate_asset_map(assets))
 
     assert results[0]["probe_status"] == "duplicate_asset"
+    assert results[0]["original_probe_status"] == "warn_dhcp"
     assert "原探测状态 warn_dhcp" in results[0]["remark"]
+    assert results[1]["original_probe_status"] == "ok_static"
     assert "old-record" in results[1]["remark"]
     assert "current-record" in results[1]["remark"]
 
@@ -472,6 +474,32 @@ def test_collect_batch_log_failure_maps_to_log_fetch_error():
     assert "task-1" in result["results"][0]["remark"]
 
 
+def test_collect_batch_failed_task_does_not_parse_partial_logs():
+    class Client:
+        def get(self, path, params=None):
+            if "task-detail" in path:
+                return 200, {
+                    "status": "failed",
+                    "is_finished": True,
+                    "is_success": False,
+                    "summary": {"failures": {"host-b": "module failed"}},
+                }
+            if "log" in path:
+                raise AssertionError("failed task should not fetch or parse partial logs")
+            return 200, {}
+
+    assets = [
+        {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"},
+        {"id": "asset-2", "name": "host-b", "address": "192.0.2.11"},
+    ]
+    record = {"batch_index": 1, "asset_count": 2, "polls": []}
+
+    result = check.collect_batch_result(Client(), assets, record, "task-1", 0, 1)
+
+    assert [item["probe_status"] for item in result["results"]] == ["ops_task_failed", "ops_task_failed"]
+    assert all("task-1" in item["remark"] for item in result["results"])
+
+
 def test_summary_message_for_asset_matches_normalized_labels():
     asset = {"name": "192.168.101.121_netty Redis Cluster", "address": "192.168.101.121"}
     summary = {
@@ -672,6 +700,33 @@ def test_markdown_report_includes_new_error_statuses():
     assert "### api_error（1）" in content
     assert "### log_fetch_error（1）" in content
     assert "### probe_script_error（1）" in content
+
+
+def test_duplicate_assets_preserve_secondary_problem_counts_in_report():
+    started = check.dt.datetime(2026, 5, 19, 10, 0, tzinfo=check.dt.timezone.utc).astimezone()
+    results = [
+        {
+            **check.base_result({"name": "dup-a", "address": "192.0.2.10"}, "duplicate_asset", remark="duplicate"),
+            "original_probe_status": "warn_dhcp",
+        },
+        {
+            **check.base_result({"name": "dup-b", "address": "192.0.2.10"}, "duplicate_asset", remark="duplicate"),
+            "original_probe_status": "ip_mismatch",
+        },
+    ]
+
+    content = check.build_markdown_report(
+        results,
+        started,
+        started,
+        summary={"total_assets": 2, "linux_assets": 2, "windows_assets": 0},
+    )
+
+    assert "| duplicate_asset | 2 |" in content
+    assert "| warn_dhcp | 1 |" in content
+    assert "| ip_mismatch | 1 |" in content
+    assert "### warn_dhcp（1）" in content
+    assert "### ip_mismatch（1）" in content
 
 
 def test_summarize_assets_uses_explicit_linux_scope():
