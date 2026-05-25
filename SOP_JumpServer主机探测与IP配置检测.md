@@ -38,8 +38,8 @@
 
 | 条目 | 说明 |
 |------|------|
-| 目标主机 | JumpServer 中 `is_active=true` 且 OS 类型为 Linux 的全量资产 |
-| 排除主机 | OS 类型为 Windows 的资产（在报告中单独列出，不做探测） |
+| 目标主机 | JumpServer 中 `is_active=true` 且 OS / platform 可明确识别为 Linux 的全量资产 |
+| 排除主机 | OS 类型为 Windows、非 Linux 或未知平台的资产（在报告中单独列出，不做探测） |
 | 触发方式 | 定时执行（建议每周一次）或运维手动触发 |
 | 所需权限 | JumpServer API Key（需有资产读权限 + Ops 执行权限） |
 | 报告流向 | 本地 `reports/yuque/` + 语雀时间戳文档 + 企业微信摘要 |
@@ -50,8 +50,8 @@
 ```text
 初始化鉴权
   -> 拉取活跃资产
-  -> 跳过 Windows 资产
-  -> 当前账号已授权 Linux / 非 Windows 资产一次提交 Ops job
+  -> 跳过 Windows / 非 Linux / 未知平台资产
+  -> 当前账号已授权 Linux 资产一次提交 Ops job
   -> 创建 JumpServer Ops 作业
   -> 轮询任务状态
   -> 分页获取完整执行日志
@@ -98,7 +98,7 @@
     ▼
 拉取全量资产（分页）
     │
-    ├─ Windows → 跳过，加入"已排除"列表
+    ├─ Windows / 非 Linux / 未知平台 → 跳过，加入"已排除"列表
     │
     ▼
 按授权资产 all-in-one 批量提交
@@ -222,7 +222,7 @@ GET /api/v1/perms/users/self/assets/
 | `id` | 唯一标识，Ops 任务中引用 |
 | `hostname` | 主机名，报告展示 |
 | `ip` | IP 地址，报告展示 |
-| `platform` / `os` | 判断是否为 Linux，过滤 Windows |
+| `platform` / `os` | 正向判断是否为 Linux，并过滤 Windows、非 Linux 和未知平台 |
 | `connectivity` | JumpServer 记录的上次连通状态（仅参考，不代替本次探测） |
 | `nodes` | 所属节点/分组，便于报告分类 |
 
@@ -233,8 +233,12 @@ GET /api/v1/perms/users/self/assets/
     → 加入 skipped_windows 列表
     → 不进入后续探测流程
 
-其余资产
+若 platform / os 可明确识别为 Linux
     → 加入 linux_assets 列表
+
+其余非 Windows 资产
+    → 加入 skipped_non_linux 列表
+    → 不进入后续探测流程
 ```
 
 ### 5.4 拉取后记录
@@ -242,6 +246,7 @@ GET /api/v1/perms/users/self/assets/
 - 总资产数
 - Linux 资产数（待探测）
 - Windows 资产数（已跳过）
+- 非 Linux / 未知平台资产数（已跳过）
 - 拉取时间戳（用于报告）
 
 ---
@@ -293,7 +298,7 @@ ip -o -4 addr show scope global
 
 `IP_ADDR` 用于展示默认路由主 IP，`IP_ADDRS` 用于记录主机当前所有全局 IPv4。比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产记录 IP 存在于该列表，就认为 IP 匹配，避免多 IP 主机被误判为 `ip_mismatch`。
 
-`IP_ADDRS` 默认排除 `172.*` 地址段。该段在当前环境中主要来自 Docker/容器网桥地址，不作为 JumpServer 资产 IP 比对依据；解析历史日志时也会二次过滤，避免容器地址造成误判。
+`IP_ADDRS` 默认仅排除 Docker 默认 `172.17.*` 网桥地址。不要排除整个 `172.16.0.0/12` 私网段；该网段可能是合法主机地址，必须保留用于和 JumpServer 资产 IP 比对。
 
 ---
 
@@ -361,7 +366,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 
 ### 7.6 执行模式
 
-准确报告默认使用 `batch --batch-size 0`：所有当前账号已授权、非 Windows 资产一次提交 Ops job，payload 同时携带 `assets` 和 `nodes`，对齐 JumpServer Web 控制台作业链路。
+准确报告默认使用 `batch --batch-size 0`：所有当前账号已授权且明确识别为 Linux 的资产一次提交 Ops job，payload 同时携带 `assets` 和 `nodes`，对齐 JumpServer Web 控制台作业链路。
 
 执行前先从官方资产接口 `/api/v1/assets/assets/` 拉取全量活跃资产作为报告总口径，再从 `/api/v1/perms/users/self/assets/` 拉取当前账号可执行资产。全量资产中未授权的部分不提交 Ops，直接在报告中标记为 `permission_denied`。
 
@@ -438,6 +443,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `permission_denied` | 当前 API/Ops 权限无法访问该资产 |
 | `no_account` | JumpServer 未找到该资产可用登录账号 |
 | `parse_error` | 探测到主机但输出解析失败 |
+| `skipped_non_linux` | 非 Linux / 未知平台资产按 SOP 跳过 |
 
 ---
 
@@ -531,7 +537,8 @@ Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主�
 探测时间：2025-05-19 10:00:00
 总资产数：350
   └─ Windows（已跳过）：2
-  └─ Linux（参与探测）：348
+  └─ Linux（参与探测）：347
+  └─ 非 Linux / 未知平台（已跳过）：1
 探测结果：
   ├─ 正常（固定 IP）：310
   ├─ 动态 IP 告警：15

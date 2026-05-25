@@ -45,14 +45,14 @@ actual_ip="$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 if_name="$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
 
 if command -v ip >/dev/null 2>&1; then
-  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '$0 !~ /^172\./ && !seen[$0]++' | paste -sd, -)"
+  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '$0 !~ /^172\.17\./ && !seen[$0]++' | paste -sd, -)"
 fi
 
 if [ -z "$all_ips" ] && command -v hostname >/dev/null 2>&1; then
-  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^172\./ && !seen[$0]++' | paste -sd, -)"
+  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^172\.17\./ && !seen[$0]++' | paste -sd, -)"
 fi
 
-if [ -n "$actual_ip" ] && ! printf '%s\n' "$actual_ip" | grep -q '^172\.'; then
+if [ -n "$actual_ip" ] && ! printf '%s\n' "$actual_ip" | grep -q '^172\.17\.'; then
   case ",$all_ips," in
     *",$actual_ip,"*) ;;
     *) all_ips="${all_ips:+$all_ips,}$actual_ip" ;;
@@ -451,6 +451,31 @@ def is_windows_asset(asset: dict[str, Any]) -> bool:
     return "windows" in platform_text(asset).lower()
 
 
+def is_linux_asset(asset: dict[str, Any]) -> bool:
+    text = platform_text(asset).lower()
+    if not text or is_windows_asset(asset):
+        return False
+    linux_markers = (
+        "linux",
+        "ubuntu",
+        "debian",
+        "centos",
+        "red hat",
+        "redhat",
+        "rhel",
+        "rocky",
+        "alma",
+        "fedora",
+        "suse",
+        "opensuse",
+        "oracle linux",
+        "kylin",
+        "anolis",
+        "uos",
+    )
+    return any(marker in text for marker in linux_markers)
+
+
 def asset_name(asset: dict[str, Any]) -> str:
     return str(asset.get("hostname") or asset.get("name") or asset.get("address") or asset.get("ip") or asset.get("id") or "")
 
@@ -527,17 +552,21 @@ def chunks_by_primary_node(assets: list[dict[str, Any]], max_size: int = 0) -> l
 def summarize_assets(assets: list[dict[str, Any]]) -> dict[str, Any]:
     platforms = Counter(platform_text(asset) or "unknown" for asset in assets)
     nodes = Counter()
+    linux = 0
     windows = 0
     for asset in assets:
-        if is_windows_asset(asset):
+        if is_linux_asset(asset):
+            linux += 1
+        elif is_windows_asset(asset):
             windows += 1
         for name in (node_names(asset) or "未分组").split(", "):
             if name:
                 nodes[name] += 1
     return {
         "total": len(assets),
-        "linux_or_non_windows": len(assets) - windows,
+        "linux": linux,
         "windows": windows,
+        "unsupported": len(assets) - linux - windows,
         "platforms": dict(platforms),
         "top_nodes": dict(nodes.most_common(20)),
     }
@@ -654,6 +683,17 @@ def permission_denied_result(asset: dict[str, Any], remark: str = "当前账号�
     return base_result(asset, "permission_denied", remark=remark, source="preflight")
 
 
+def skipped_non_linux_result(asset: dict[str, Any]) -> dict[str, Any]:
+    platform = platform_text(asset) or "unknown"
+    return base_result(
+        asset,
+        "skipped_non_linux",
+        connectivity="skipped",
+        remark=f"非 Linux 平台资产按 SOP 跳过：{platform}",
+        source="skipped",
+    )
+
+
 def status_result(asset: dict[str, Any], status: str, remark: str, connectivity: str = "unknown") -> dict[str, Any]:
     return base_result(asset, status, connectivity=connectivity, remark=remark)
 
@@ -694,7 +734,7 @@ def fetch_full_job_log(client: JumpServerClient, task_id: str, max_pages: int = 
     pages: list[dict[str, Any]] = []
     mark = None
     status = 0
-    for _ in range(max_pages):
+    for page_index in range(max_pages):
         params = {"mark": mark} if mark else None
         status, payload = client.get(f"/api/v1/ops/ansible/job-execution/{task_id}/log/", params=params)
         if not (200 <= status < 300):
@@ -714,6 +754,10 @@ def fetch_full_job_log(client: JumpServerClient, task_id: str, max_pages: int = 
             break
         next_mark = payload.get("mark")
         if not next_mark or next_mark == mark:
+            pages[-1]["stalled"] = True
+            break
+        if page_index == max_pages - 1:
+            pages[-1]["truncated"] = True
             break
         mark = str(next_mark)
     return status, "".join(chunks_text), pages
@@ -727,7 +771,11 @@ def log_fetch_failed(status: int, pages: list[dict[str, Any]]) -> bool:
     last_page = pages[-1]
     if last_page.get("error"):
         return True
-    if last_page.get("end") is False and not last_page.get("mark"):
+    if last_page.get("truncated"):
+        return True
+    if last_page.get("stalled"):
+        return True
+    if last_page.get("end") is False:
         return True
     return False
 
@@ -747,7 +795,7 @@ def parse_kv_block(text: str) -> dict[str, str] | None:
 
 
 def is_ignored_probe_ip(value: str) -> bool:
-    return value.startswith("172.")
+    return value.startswith("172.17.")
 
 
 def split_ip_values(value: str, *, include_ignored: bool = False) -> list[str]:
@@ -928,12 +976,14 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
     ip_type = (values.get("IP_TYPE") or "unknown").lower()
     actual_ip = values.get("IP_ADDR") or ""
     actual_ips = split_ip_values(values.get("IP_ADDRS") or actual_ip)
-    if actual_ip and actual_ip not in actual_ips:
+    if actual_ip and not is_ignored_probe_ip(actual_ip) and actual_ip not in actual_ips:
         actual_ips.insert(0, actual_ip)
     recorded_ip = asset_ip(asset)
     ip_match: bool | str = ""
     if recorded_ip and actual_ips:
         ip_match = recorded_ip in actual_ips
+    elif recorded_ip and is_ignored_probe_ip(recorded_ip):
+        ip_match = False
     base.update(
         {
             "actual_ip": actual_ip,
@@ -1183,6 +1233,7 @@ PROBLEM_STATUSES = (
     "no_account",
     "parse_error",
     "probe_script_error",
+    "skipped_non_linux",
 )
 
 
@@ -1238,8 +1289,9 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
         "## 汇总",
         "",
         f"- 活跃资产总数：{summary.get('total_assets', 0)}",
-        f"- Linux / 非 Windows 参与探测：{summary.get('linux_assets', 0)}",
+        f"- Linux 参与探测：{summary.get('linux_assets', 0)}",
         f"- Windows 跳过：{summary.get('windows_assets', 0)}",
+        f"- 非 Linux 跳过：{summary.get('unsupported_assets', 0)}",
         f"- 执行模式：{summary.get('execution_mode', '')}",
         f"- 重复资产 IP 数：{summary.get('duplicate_ip_count', 0)}",
         f"- 报告记录数：{len(results)}",
@@ -1260,6 +1312,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "no_account",
             "parse_error",
             "probe_script_error",
+            "skipped_non_linux",
             "skipped_windows",
         )]),
         "",
@@ -1325,12 +1378,18 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit(f"No active asset matched query: {args.query}")
     authorized_assets = fetch_authorized_assets(client, page_size=args.page_size)
     authorized = asset_ids(authorized_assets)
-    unauthorized_assets = [asset for asset in assets if asset.get("id") and str(asset["id"]) not in authorized]
-    executable_assets = [asset for asset in assets if not asset.get("id") or str(asset["id"]) in authorized]
     windows_assets = [asset for asset in assets if is_windows_asset(asset)]
-    linux_assets = [asset for asset in executable_assets if not is_windows_asset(asset)]
+    target_linux_assets = [asset for asset in assets if is_linux_asset(asset)]
+    unsupported_assets = [asset for asset in assets if not is_windows_asset(asset) and not is_linux_asset(asset)]
+    unauthorized_assets = [
+        asset for asset in target_linux_assets if asset.get("id") and str(asset["id"]) not in authorized
+    ]
+    linux_assets = [
+        asset for asset in target_linux_assets if not asset.get("id") or str(asset["id"]) in authorized
+    ]
     results = [skipped_windows_result(asset) for asset in windows_assets]
-    results.extend(permission_denied_result(asset) for asset in unauthorized_assets if not is_windows_asset(asset))
+    results.extend(skipped_non_linux_result(asset) for asset in unsupported_assets)
+    results.extend(permission_denied_result(asset) for asset in unauthorized_assets)
     batch_records = []
     resume_state_path = Path(args.resume_state)
     can_resume = args.resume and args.execution_mode == "batch" and args.batch_size == 0 and not args.query and args.max_assets is None
@@ -1396,7 +1455,8 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         "total_assets": len(assets),
         "linux_assets": len(linux_assets),
         "windows_assets": len(windows_assets),
-        "authorized_assets": len(executable_assets),
+        "unsupported_assets": len(unsupported_assets),
+        "authorized_assets": len(linux_assets),
         "unauthorized_assets": len(unauthorized_assets),
         "execution_mode": args.execution_mode,
         "batch_size": args.batch_size,

@@ -39,6 +39,17 @@ def test_asset_normalization_and_windows_detection():
     assert check.asset_name(linux) == "host-a"
     assert check.asset_ip(linux) == "192.0.2.10"
     assert check.node_names(linux) == "中间件, 运维"
+    assert check.is_linux_asset(linux)
+    assert not check.is_linux_asset(windows)
+
+
+def test_unknown_or_network_platform_is_not_treated_as_linux():
+    network_device = {"platform": {"name": "Cisco IOS"}, "address": "192.0.2.1"}
+    unknown_platform = {"platform": "", "os": "", "address": "192.0.2.2"}
+
+    assert not check.is_windows_asset(network_device)
+    assert not check.is_linux_asset(network_device)
+    assert not check.is_linux_asset(unknown_platform)
 
 
 def test_filter_assets_by_query():
@@ -77,7 +88,8 @@ def test_detection_command_is_read_only_and_has_markers():
     assert "DETECT_END" in command
     assert "IP_ADDRS=" in command
     assert "ip -o -4 addr show scope global" in command
-    assert "$0 !~ /^172\\./" in command
+    assert "$0 !~ /^172\\.17\\./" in command
+    assert "$0 !~ /^172\\./" not in command
     for forbidden in ("rm ", "mv ", "truncate", "reboot", "shutdown", "docker prune", "journalctl --vacuum"):
         assert forbidden not in command
 
@@ -154,6 +166,46 @@ def test_fetch_full_job_log_records_http_error():
     assert status == 500
     assert "temporary failure" in log
     assert pages[-1]["error"] is True
+    assert check.log_fetch_failed(status, pages)
+
+
+def test_fetch_full_job_log_marks_page_limit_truncation_as_failure():
+    class Client:
+        def get(self, path, params=None):
+            mark = "m2" if params else "m1"
+            return 200, {"data": "partial\\n", "end": False, "mark": mark}
+
+    status, log, pages = check.fetch_full_job_log(Client(), "task-1", max_pages=2)
+
+    assert status == 200
+    assert log == "partial\npartial\n"
+    assert pages[-1]["truncated"] is True
+    assert check.log_fetch_failed(status, pages)
+
+
+def test_fetch_full_job_log_marks_repeated_mark_as_failure():
+    class Client:
+        def get(self, path, params=None):
+            return 200, {"data": "partial\\n", "end": False, "mark": "same-mark"}
+
+    status, log, pages = check.fetch_full_job_log(Client(), "task-1")
+
+    assert status == 200
+    assert log == "partial\npartial\n"
+    assert pages[-1]["stalled"] is True
+    assert check.log_fetch_failed(status, pages)
+
+
+def test_fetch_full_job_log_marks_missing_mark_as_failure():
+    class Client:
+        def get(self, path, params=None):
+            return 200, {"data": "partial\\n", "end": False}
+
+    status, log, pages = check.fetch_full_job_log(Client(), "task-1")
+
+    assert status == 200
+    assert log == "partial\n"
+    assert pages[-1]["stalled"] is True
     assert check.log_fetch_failed(status, pages)
 
 
@@ -317,8 +369,31 @@ def test_parse_probe_ignores_172_docker_ips():
     result = check.classify_probe_result(asset, segment)
 
     assert result["probe_status"] == "ip_mismatch"
-    assert result["actual_ips"] == "192.0.2.10"
+    assert result["actual_ips"] == "192.0.2.10, 172.18.0.1"
     assert result["ip_match"] is False
+
+
+def test_parse_probe_does_not_reinsert_ignored_actual_ip_for_matching():
+    asset = {"id": "asset-1", "name": "host-a", "address": "172.17.0.1"}
+    segment = "DETECT_START\nIP_TYPE=static\nIP_ADDR=172.17.0.1\nIP_ADDRS=172.17.0.1\nIF_NAME=docker0\nDETECT_END"
+
+    result = check.classify_probe_result(asset, segment)
+
+    assert result["probe_status"] == "ip_mismatch"
+    assert result["actual_ip"] == "172.17.0.1"
+    assert result["actual_ips"] == ""
+    assert result["ip_match"] is False
+
+
+def test_parse_probe_keeps_legitimate_172_private_host_ips():
+    asset = {"id": "asset-1", "name": "host-a", "address": "172.20.10.5"}
+    segment = "DETECT_START\nIP_TYPE=static\nIP_ADDR=172.20.10.5\nIP_ADDRS=172.20.10.5,192.0.2.10\nIF_NAME=eth0\nDETECT_END"
+
+    result = check.classify_probe_result(asset, segment)
+
+    assert result["probe_status"] == "ok_static"
+    assert result["actual_ips"] == "172.20.10.5, 192.0.2.10"
+    assert result["ip_match"] is True
 
 
 def test_parse_probe_dhcp_and_ip_mismatch_priority():
@@ -599,8 +674,24 @@ def test_markdown_report_includes_new_error_statuses():
     assert "### probe_script_error（1）" in content
 
 
+def test_summarize_assets_uses_explicit_linux_scope():
+    assets = [
+        {"platform": {"name": "Linux"}, "address": "192.0.2.1"},
+        {"platform": "Windows Server", "address": "192.0.2.2"},
+        {"platform": {"name": "Cisco IOS"}, "address": "192.0.2.3"},
+        {"platform": "", "os": "", "address": "192.0.2.4"},
+    ]
+
+    summary = check.summarize_assets(assets)
+
+    assert summary["linux"] == 1
+    assert summary["windows"] == 1
+    assert summary["unsupported"] == 2
+    assert "linux_or_non_windows" not in summary
+
+
 def test_run_detect_resumes_matching_state(monkeypatch, tmp_path: Path):
-    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "nodes": [{"id": "node-1"}]}
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "platform": {"name": "Linux"}, "nodes": [{"id": "node-1"}]}
     state_path = tmp_path / "resume.json"
     signature = check.resume_signature([asset], runas="root", timeout=-1)
     check.save_resume_state(
@@ -664,3 +755,62 @@ def test_run_detect_resumes_matching_state(monkeypatch, tmp_path: Path):
 
     assert result["status_counts"] == {"ok_static": 1}
     assert state["status"] == "parsed"
+
+
+def test_run_detect_skips_non_linux_assets_without_ops_submission(monkeypatch, tmp_path: Path):
+    linux_asset = {"id": "asset-1", "name": "linux-host", "address": "192.0.2.10", "platform": {"name": "Linux"}}
+    network_asset = {"id": "asset-2", "name": "switch-1", "address": "192.0.2.20", "platform": {"name": "Cisco IOS"}}
+    posted_assets = []
+
+    class Client:
+        def __init__(self, no_proxy=False):
+            pass
+
+        def post(self, path, body):
+            posted_assets.extend(body["assets"])
+            return 201, {"task_id": "task-1"}
+
+        def get(self, path, params=None):
+            if "profile" in path:
+                return 200, {"id": "user"}
+            if "assets/assets" in path:
+                return 200, {"results": [linux_asset, network_asset], "next": None}
+            if "perms/users/self/assets" in path:
+                return 200, {"results": [linux_asset, network_asset], "next": None}
+            if "task-detail" in path:
+                return 200, {"status": "success", "is_finished": True, "is_success": True, "summary": {}}
+            if "log" in path:
+                return 200, {"data": "linux-host | CHANGED | rc=0 >>\nDETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10\nIF_NAME=eth0\nDETECT_END\n", "end": True, "mark": "m1"}
+            return 200, {}
+
+    monkeypatch.setattr(check, "JumpServerClient", Client)
+    args = type(
+        "Args",
+        (),
+        {
+            "no_proxy": True,
+            "page_size": 100,
+            "query": None,
+            "max_assets": None,
+            "execution_mode": "batch",
+            "batch_size": 0,
+            "timeout": -1,
+            "poll_interval": 0,
+            "runas": "root",
+            "wait_timeout": 1,
+            "batch_gap": 0,
+            "concurrency": 1,
+            "output_dir": str(tmp_path / "reports"),
+            "raw_output_dir": str(tmp_path / "raw"),
+            "retention_count": 12,
+            "resume": False,
+            "resume_state": str(tmp_path / "resume.json"),
+        },
+    )()
+
+    result = check.run_detect(args)
+
+    assert posted_assets == ["asset-1"]
+    assert result["summary"]["linux_assets"] == 1
+    assert result["summary"]["unsupported_assets"] == 1
+    assert result["status_counts"] == {"skipped_non_linux": 1, "ok_static": 1}

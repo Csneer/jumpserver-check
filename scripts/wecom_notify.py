@@ -31,6 +31,7 @@ STATUS_COUNT_LABELS = {
     "no_account": "无账号",
     "parse_error": "解析失败",
     "probe_script_error": "探测脚本异常",
+    "skipped_non_linux": "跳过非Linux",
     "skipped_windows": "跳过Windows",
 }
 
@@ -114,6 +115,7 @@ def build_markdown_message(
             "no_account",
             "parse_error",
             "probe_script_error",
+            "skipped_non_linux",
             "skipped_windows",
         ]
         count_text = "，".join(
@@ -144,6 +146,7 @@ def ordered_status_counts(status_counts: dict[str, Any]) -> list[tuple[str, int]
         "no_account",
         "parse_error",
         "probe_script_error",
+        "skipped_non_linux",
         "skipped_windows",
     ]
     result: list[tuple[str, int]] = []

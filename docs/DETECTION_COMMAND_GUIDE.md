@@ -43,7 +43,7 @@ hostname -I
 
 比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产 IP 出现在 `IP_ADDRS` 中，就认为 IP 一致。这用于支持单主机多 IP 场景。
 
-`172.*` 默认被排除，因为当前环境中基本来自 Docker/容器网桥地址。脚本侧也会二次过滤历史日志中的 `172.*`，避免容器地址造成误报。
+Docker 默认 `172.17.*` 网桥地址会被排除。不要排除整个 `172.16.0.0/12` 私网段；该网段可能是合法主机地址，必须保留用于和 JumpServer 资产 IP 比对。
 
 ## IP 类型判断优先级
 
@@ -74,5 +74,5 @@ python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --d
 
 - 单主机报告能解析出 `IP_TYPE`、`IP_ADDR`、`IP_ADDRS`、`IF_NAME`。
 - 多 IP 主机不因默认路由 IP 不同被误判为 `ip_mismatch`。
-- `172.*` 不出现在最终 `探测IP列表`。
+- Docker 默认 `172.17.*` 地址不出现在最终 `探测IP列表`，合法 `172.16.0.0/12` 主机地址仍会保留。
 - dry-run 全流程能生成报告、语雀同步计划和企业微信消息内容。
