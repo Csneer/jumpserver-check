@@ -79,7 +79,7 @@
   - `cat /etc/sysconfig/network-scripts/ifcfg-*`
   - `cat /etc/netplan/*.yaml`
   - `cat /etc/network/interfaces`
-  - `ps aux | grep dhclient`
+  - `pgrep -x dhclient`
 - [ ] 无需 root 权限，普通用户即可（sudo 不是必须）
 
 ### 2.3 执行环境
@@ -283,7 +283,7 @@ DETECT_END
 | 2 | `grep BOOTPROTO /etc/sysconfig/network-scripts/ifcfg-*` | `static` 或 `none` → static；`dhcp` → dhcp | CentOS / RHEL 7 及以下 |
 | 3 | `cat /etc/netplan/*.yaml` | `dhcp4: true` → dhcp；`addresses:` 且无 dhcp4 → static | Ubuntu 18.04+ |
 | 4 | `grep inet /etc/network/interfaces` | `dhcp` → dhcp；`static` → static | Debian / Ubuntu 旧版 |
-| 兜底 | `ps aux \| grep dhclient` | 有进程在运行 → dhcp；否则 → unknown | 任意 |
+| 兜底 | `pgrep -x dhclient` | 有进程在运行 → dhcp；否则 → unknown | 任意 |
 
 命令内部按以上顺序依次尝试，遇到第一个有效结果即输出并退出判断。
 
@@ -296,7 +296,7 @@ ip route get 1.1.1.1 | grep -oP 'src \K[\d.]+'
 ip -o -4 addr show scope global
 ```
 
-`IP_ADDR` 用于展示默认路由主 IP，`IP_ADDRS` 用于记录主机当前所有全局 IPv4。比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产记录 IP 存在于该列表，就认为 IP 匹配，避免多 IP 主机被误判为 `ip_mismatch`。
+`IP_ADDR` 用于展示默认路由主 IP，`IP_ADDRS` 用于记录主机当前所有全局 IPv4。比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产记录 IP 存在于该列表，就认为 IP 匹配，避免多 IP 主机被误判为 `ip_mismatch`。若资产有记录 IP 但 `IP_ADDRS` 为空，本次探测不能输出 `ok_static` 或 `warn_dhcp`，必须归类为 `manual_check`。
 
 `IP_ADDRS` 默认仅排除 Docker 默认 `172.17.*` 网桥地址。不要排除整个 `172.16.0.0/12` 私网段；该网段可能是合法主机地址，必须保留用于和 JumpServer 资产 IP 比对。
 
@@ -419,6 +419,7 @@ GET /api/v1/ops/ansible/job-execution/{task_id}/log/
 **步骤 3**：解析键值对
 
 ```
+IP_ADDRS 为空    → 归类为 manual_check（缺少可比对 IP 证据）
 IP_TYPE=static   → 归类为 ok_static
 IP_TYPE=dhcp     → 归类为 warn_dhcp
 IP_TYPE=unknown  → 归类为 manual_check（人工核查）
@@ -432,9 +433,9 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 
 | 分类标识 | 含义 |
 |----------|------|
-| `ok_static` | 连通，固定 IP，正常 |
-| `warn_dhcp` | 连通，但使用 DHCP，需整改 |
-| `manual_check` | 连通，但无法自动判断 IP 类型 |
+| `ok_static` | 连通，采集到可比对主机 IP，固定 IP，正常 |
+| `warn_dhcp` | 连通，采集到可比对主机 IP，但使用 DHCP，需整改 |
+| `manual_check` | 连通，但无法自动判断 IP 类型，或缺少可比对主机 IP |
 | `ip_mismatch` | 实际 IP 与 JumpServer 记录不一致 |
 | `unreachable` | SSH 连接失败，主机不可达 |
 | `probe_timeout` | 任务超时，未能探测 |

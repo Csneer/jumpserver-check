@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import subprocess
 from pathlib import Path
 
 from scripts import jms_host_ip_check as check
@@ -96,6 +97,18 @@ def test_detection_command_is_read_only_and_has_markers():
         assert forbidden not in command
 
 
+def test_detection_command_is_valid_posix_shell_syntax():
+    completed = subprocess.run(
+        ["/bin/sh", "-n"],
+        input=check.DETECTION_COMMAND,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_detection_command_ignores_commented_debian_dhcp_config():
     command = check.DETECTION_COMMAND
 
@@ -115,6 +128,14 @@ def test_detection_command_prioritizes_route_interface_configs():
     assert 'netplan_type="$(awk -v iface="$if_name" -v ip="$actual_ip"' in command
     assert 'iface_method = "dhcp"' in command
     assert 'ip_method = "static"' in command
+
+
+def test_detection_command_does_not_scan_its_own_command_line_for_dhclient():
+    command = check.DETECTION_COMMAND
+
+    assert "pgrep -x dhclient" in command
+    assert "ps aux" not in command
+    assert "grep '[d]hclient'" not in command
 
 
 def test_build_ops_payload_uses_asset_and_node_ids():
@@ -340,7 +361,7 @@ def test_permission_denied_result_marks_preflight_source():
 def test_parse_probe_static_success():
     asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
     segment = """
-changed: [host-a] => {"stdout": "DETECT_START\\nIP_TYPE=static\\nIP_ADDR=192.0.2.10\\nIF_NAME=ens3\\nDETECT_END"}
+changed: [host-a] => {"stdout": "DETECT_START\\nIP_TYPE=static\\nIP_ADDR=192.0.2.10\\nIP_ADDRS=192.0.2.10\\nIF_NAME=ens3\\nDETECT_END"}
 """
 
     result = check.classify_probe_result(asset, check.clean_ansible_log(segment))
@@ -408,6 +429,24 @@ def test_parse_probe_dhcp_and_ip_mismatch_priority():
     assert result["ip_type"] == "dhcp"
     assert result["ip_match"] is False
     assert result["actual_ips"] == "192.0.2.99, 198.51.100.99"
+
+
+def test_parse_probe_requires_ip_evidence_before_static_or_dhcp_conclusion():
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    segments = [
+        "DETECT_START\nIP_TYPE=static\nIP_ADDR=\nIP_ADDRS=\nIF_NAME=\nDETECT_END",
+        "DETECT_START\nIP_TYPE=dhcp\nIP_ADDR=\nIP_ADDRS=\nIF_NAME=\nDETECT_END",
+        "DETECT_START\nIP_TYPE=static\nIP_ADDR=192.0.2.10\nIP_ADDRS=\nIF_NAME=eth0\nDETECT_END",
+        "DETECT_START\nIP_TYPE=dhcp\nIP_ADDR=192.0.2.10\nIF_NAME=eth0\nDETECT_END",
+    ]
+
+    results = [check.classify_probe_result(asset, segment) for segment in segments]
+
+    assert [result["probe_status"] for result in results] == ["manual_check"] * len(segments)
+    assert all(result["actual_ips"] == "" for result in results)
+    assert all("未采集到可比对的主机 IP" in result["remark"] for result in results)
+    assert results[2]["actual_ip"] == "192.0.2.10"
+    assert results[3]["actual_ip"] == "192.0.2.10"
 
 
 def test_parse_probe_unknown_and_parse_error_and_unreachable():

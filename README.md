@@ -256,9 +256,9 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 
 ## 分类
 
-- `ok_static`：连通，固定 IP。
-- `warn_dhcp`：连通，但检测到 DHCP。
-- `manual_check`：连通，但无法自动判断 IP 类型。
+- `ok_static`：连通，采集到可比对主机 IP，且固定 IP。
+- `warn_dhcp`：连通，采集到可比对主机 IP，但检测到 DHCP。
+- `manual_check`：连通，但无法自动判断 IP 类型，或未采集到可比对的主机 IP。
 - `ip_mismatch`：实际 IP 与 JumpServer 资产 IP 不一致。
 - `duplicate_asset`：JumpServer 存在多条相同资产 IP 记录，优先作为历史遗留或重复录入问题标注；原始探测状态仍会保留并参与异常分类汇总。
 - `unreachable`：Ops 返回连接失败或无主机输出。

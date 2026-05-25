@@ -172,8 +172,8 @@ if [ "$ip_type" = "unknown" ] && [ -f /etc/network/interfaces ]; then
   esac
 fi
 
-if [ "$ip_type" = "unknown" ]; then
-  if pgrep -x dhclient >/dev/null 2>&1 || ps aux 2>/dev/null | grep '[d]hclient' >/dev/null 2>&1; then
+if [ "$ip_type" = "unknown" ] && command -v pgrep >/dev/null 2>&1; then
+  if pgrep -x dhclient >/dev/null 2>&1; then
     ip_type="dhcp"
   fi
 fi
@@ -985,8 +985,9 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         return base
     ip_type = (values.get("IP_TYPE") or "unknown").lower()
     actual_ip = values.get("IP_ADDR") or ""
-    actual_ips = split_ip_values(values.get("IP_ADDRS") or actual_ip)
-    if actual_ip and not is_ignored_probe_ip(actual_ip) and actual_ip not in actual_ips:
+    raw_actual_ips = values.get("IP_ADDRS") or ""
+    actual_ips = split_ip_values(raw_actual_ips)
+    if raw_actual_ips and actual_ip and not is_ignored_probe_ip(actual_ip) and actual_ip not in actual_ips:
         actual_ips.insert(0, actual_ip)
     recorded_ip = asset_ip(asset)
     ip_match: bool | str = ""
@@ -1004,6 +1005,10 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
             "connectivity": "ok",
         }
     )
+    if recorded_ip and not actual_ips and not is_ignored_probe_ip(recorded_ip):
+        base["probe_status"] = "manual_check"
+        base["remark"] = remark or "未采集到可比对的主机 IP，无法确认资产 IP 是否一致"
+        return base
     if ip_match is False:
         base["probe_status"] = "ip_mismatch"
         base["remark"] = remark or "实际 IP 与 JumpServer 资产 IP 不一致"

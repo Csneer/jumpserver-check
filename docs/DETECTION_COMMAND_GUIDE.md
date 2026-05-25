@@ -41,7 +41,7 @@ ip -o -4 addr show scope global
 hostname -I
 ```
 
-比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产 IP 出现在 `IP_ADDRS` 中，就认为 IP 一致。这用于支持单主机多 IP 场景。
+比对时以 `IP_ADDRS` 为准：只要 JumpServer 资产 IP 出现在 `IP_ADDRS` 中，就认为 IP 一致。这用于支持单主机多 IP 场景。若资产有记录 IP 但 `IP_ADDRS` 为空，报告必须降级为 `manual_check`，不能仅凭 `IP_TYPE=static` 或 `IP_TYPE=dhcp` 输出确定性结论。
 
 Docker 默认 `172.17.*` 网桥地址会被排除。不要排除整个 `172.16.0.0/12` 私网段；该网段可能是合法主机地址，必须保留用于和 JumpServer 资产 IP 比对。
 
@@ -54,7 +54,9 @@ Docker 默认 `172.17.*` 网桥地址会被排除。不要排除整个 `172.16.0
 3. CentOS/RHEL ifcfg：`/etc/sysconfig/network-scripts/ifcfg-*`，优先匹配默认路由网卡或实际 IP 所在配置。
 4. Ubuntu netplan：`/etc/netplan/*.yaml`、`*.yml`，优先匹配默认路由网卡或实际 IP 所在配置。
 5. Debian interfaces：`/etc/network/interfaces`，忽略注释并优先匹配默认路由网卡或实际 IP 所在配置。
-6. 兜底检查 `dhclient` 进程
+6. 兜底使用 `pgrep -x dhclient` 检查 `dhclient` 进程
+
+兜底检查不得使用 `ps aux | grep dhclient` 扫描命令行文本，避免复合 shell 命令匹配到自身内容并误报 DHCP。
 
 如果后续优化命令，优先保持这套输出字段不变。需要新增字段时，应先补解析和测试，再上线定时任务。
 
@@ -73,6 +75,7 @@ python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --d
 验收点：
 
 - 单主机报告能解析出 `IP_TYPE`、`IP_ADDR`、`IP_ADDRS`、`IF_NAME`。
+- `IP_ADDRS` 为空时不会输出 `ok_static` 或 `warn_dhcp`，而是进入 `manual_check`。
 - 多 IP 主机不因默认路由 IP 不同被误判为 `ip_mismatch`。
 - Docker 默认 `172.17.*` 地址不出现在最终 `探测IP列表`，合法 `172.16.0.0/12` 主机地址仍会保留。
 - dry-run 全流程能生成报告、语雀同步计划和企业微信消息内容。
