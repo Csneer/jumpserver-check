@@ -350,7 +350,7 @@ GET /api/v1/ops/job-execution/task-detail/{task_id}/
 | `PENDING` | 等待中 | 继续等待 |
 | `STARTED` | 执行中 | 继续等待 |
 | `SUCCESS` | 执行完成 | 进入解析阶段 |
-| `FAILURE` | 任务失败 | 本批所有主机记录为 `ops_task_failed`，不解析部分日志 |
+| `FAILURE` | 任务失败 | 仍尝试解析可用日志；只有没有可比对证据的主机才保留 `ops_task_failed` |
 
 ### 7.4 轮询超时处理
 
@@ -441,7 +441,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `probe_timeout` | 任务超时，未能探测 |
 | `ops_no_output` | Ops 任务成功但没有返回主机输出 |
 | `ops_module_error` | Ops/Ansible 模块执行异常 |
-| `ops_task_failed` | Ops 任务整体失败，不按部分日志生成主机级结论 |
+| `ops_task_failed` | Ops 任务整体失败，但可解析主机仍按日志分类；仅无证据主机保留该状态 |
 | `permission_denied` | 当前 API/Ops 权限无法访问该资产 |
 | `no_account` | JumpServer 未找到该资产可用登录账号 |
 | `parse_error` | 探测到主机但输出解析失败 |

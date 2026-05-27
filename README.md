@@ -267,7 +267,7 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 - `probe_timeout`：批次任务创建失败或轮询超时。
 - `ops_no_output`：Ops 任务成功但没有返回主机输出，不等同于主机不可达。
 - `ops_module_error`：Ops/Ansible 模块执行异常。
-- `ops_task_failed`：JumpServer Ops 任务整体失败，报告不再按部分日志生成主机级结论。
+- `ops_task_failed`：JumpServer Ops 任务整体失败，只有没有可比对日志/摘要证据的资产才保留该状态；其余可解析资产仍按日志结果分类。
 - `permission_denied`：当前 API/Ops 权限无法访问该资产。
 - `no_account`：JumpServer 未找到该资产可用登录账号。
 - `parse_error`：主机有输出，但缺少固定探测 marker。

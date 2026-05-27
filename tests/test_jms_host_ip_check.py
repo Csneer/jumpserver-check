@@ -513,7 +513,7 @@ def test_collect_batch_log_failure_maps_to_log_fetch_error():
     assert "task-1" in result["results"][0]["remark"]
 
 
-def test_collect_batch_failed_task_does_not_parse_partial_logs():
+def test_collect_batch_failed_task_parses_available_logs():
     class Client:
         def get(self, path, params=None):
             if "task-detail" in path:
@@ -524,19 +524,36 @@ def test_collect_batch_failed_task_does_not_parse_partial_logs():
                     "summary": {"failures": {"host-b": "module failed"}},
                 }
             if "log" in path:
-                raise AssertionError("failed task should not fetch or parse partial logs")
+                return 200, {
+                    "data": (
+                        "host-a | CHANGED | rc=0 >>\n"
+                        "DETECT_START\n"
+                        "IP_TYPE=static\n"
+                        "IP_ADDR=192.0.2.10\n"
+                        "IP_ADDRS=192.0.2.10\n"
+                        "IF_NAME=eth0\n"
+                        "DETECT_END\n"
+                        "host-b | FAILED! => 无可用账号\n"
+                    ),
+                    "end": True,
+                    "mark": "m1",
+                }
             return 200, {}
 
     assets = [
         {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"},
         {"id": "asset-2", "name": "host-b", "address": "192.0.2.11"},
+        {"id": "asset-3", "name": "host-c", "address": "192.0.2.12"},
     ]
-    record = {"batch_index": 1, "asset_count": 2, "polls": []}
+    record = {"batch_index": 1, "asset_count": 3, "polls": []}
 
     result = check.collect_batch_result(Client(), assets, record, "task-1", 0, 1)
 
-    assert [item["probe_status"] for item in result["results"]] == ["ops_task_failed", "ops_task_failed"]
-    assert all("task-1" in item["remark"] for item in result["results"])
+    assert [item["probe_status"] for item in result["results"]] == ["ok_static", "no_account", "ops_task_failed"]
+    assert result["results"][0]["actual_ips"] == "192.0.2.10"
+    assert "task-1" not in result["results"][0]["remark"]
+    assert result["results"][1]["remark"] == "JumpServer Ops 无可用登录账号"
+    assert "task-1" in result["results"][2]["remark"]
 
 
 def test_summary_message_for_asset_matches_normalized_labels():

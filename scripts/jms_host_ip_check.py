@@ -1124,11 +1124,6 @@ def collect_batch_result(
             classify_probe_result(asset, "", timed_out=True, remark=f"批次任务超时，task_id={task_id}") for asset in batch
         ]
         return batch_record
-    if task.get("is_success") is False or str(task.get("status") or "").lower() == "failed":
-        batch_record["results"] = [
-            ops_task_failed_result(asset, task_id, summary_message_for_asset(asset, task.get("summary"))) for asset in batch
-        ]
-        return batch_record
 
     log_status, log_text, log_pages = fetch_full_job_log(client, task_id)
     batch_record["log_status"] = log_status
@@ -1140,12 +1135,18 @@ def collect_batch_result(
         batch_record["results"] = [status_result(asset, "log_fetch_error", remark) for asset in batch]
         return batch_record
     results = []
+    task_failed = not bool(task.get("is_success")) or str(task.get("status") or "").lower() == "failed"
     for asset in batch:
         segment = section_for_asset(asset, log_text, len(batch))
         summary_message = summary_message_for_asset(asset, task.get("summary"))
-        if summary_message:
-            segment = f"{summary_message}\n{segment}".strip()
-        results.append(classify_probe_result(asset, segment, remark=summary_message))
+        if segment:
+            results.append(classify_probe_result(asset, segment))
+        elif summary_message:
+            results.append(classify_probe_result(asset, summary_message, remark=summary_message))
+        elif task_failed:
+            results.append(ops_task_failed_result(asset, task_id))
+        else:
+            results.append(classify_probe_result(asset, segment, remark=summary_message))
     batch_record["results"] = results
     return batch_record
 
