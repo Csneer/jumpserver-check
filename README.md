@@ -295,12 +295,30 @@ python -m pytest
 python scripts/host_cleanup.py evaluate --profile local
 ```
 
-启动本地确认页面：
+启动本地确认页面（临时前台运行）：
 
 ```bash
 CLEANUP_ADMIN_TOKEN=replace-with-local-token \
 python scripts/cleanup_admin_server.py --profile local --host 127.0.0.1 --port 8088
 ```
+
+长期运行建议使用 systemd 服务。先在 `.env` 中配置：
+
+```env
+CLEANUP_ADMIN_TOKEN=replace-with-a-strong-token
+CLEANUP_ADMIN_PROFILE=local
+CLEANUP_ADMIN_HOST=127.0.0.1
+CLEANUP_ADMIN_PORT=8088
+```
+
+然后在部署机执行：
+
+```bash
+sudo bash scripts/install_cleanup_admin_service.sh
+sudo systemctl status jumpserver-cleanup-admin.service
+```
+
+默认监听 `127.0.0.1:8088`，推荐通过 SSH 端口转发访问；如果要直接访问 `http://<server>:8088/`，可将 `CLEANUP_ADMIN_HOST=0.0.0.0`，但必须配置强 token。
 
 定时巡检如需产出可用于清理的正式证据，应显式标记来源：
 

@@ -90,6 +90,10 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
     try:
         if method == "GET" and route == "/":
             return html_response(INDEX_HTML)
+        if method == "GET" and route == "/favicon.ico":
+            return Response(status=204, body=b"", headers={})
+        if method == "GET" and route == "/api/health":
+            return json_response(200, {"status": "ok", "profile": context.profile})
         if method == "GET" and route == "/api/candidates":
             plan = host_cleanup.evaluate_cleanup(
                 profile=context.profile,
@@ -141,77 +145,87 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>JumpServer 废弃主机确认</title>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JumpServer 废弃主机确认</title>
 <style>
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:24px;line-height:1.45}
-table{border-collapse:collapse;width:100%;margin-top:16px}th,td{border:1px solid #ddd;padding:8px;vertical-align:top}th{background:#f7f7f7}
-button{margin:2px 4px 2px 0}.muted{color:#666}.danger{color:#9b1c1c}.ok{color:#166534}
-</style></head>
+:root{
+  color-scheme: light;
+  --bg:#eef3f8;--panel:#ffffff;--panel-soft:#f8fafc;--text:#0f172a;--muted:#64748b;
+  --line:#dbe4ee;--brand:#2563eb;--brand-dark:#1d4ed8;--ok:#16a34a;--warn:#d97706;--danger:#dc2626;--purple:#7c3aed;
+  --shadow:0 20px 50px rgba(15,23,42,.10);--shadow-sm:0 8px 24px rgba(15,23,42,.08);--radius:18px;
+}
+*{box-sizing:border-box} body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:radial-gradient(circle at top left,#dbeafe 0,#eef3f8 34%,#f8fafc 100%)}
+.shell{max-width:1440px;margin:0 auto;padding:28px}.hero{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:22px;align-items:stretch;margin-bottom:22px}.hero-card,.control-card,.panel{background:rgba(255,255,255,.92);border:1px solid rgba(219,228,238,.9);box-shadow:var(--shadow);border-radius:var(--radius);backdrop-filter:blur(10px)}
+.hero-card{padding:28px;position:relative;overflow:hidden}.hero-card:after{content:"";position:absolute;right:-80px;top:-90px;width:260px;height:260px;border-radius:50%;background:linear-gradient(135deg,rgba(37,99,235,.16),rgba(124,58,237,.12))}.eyebrow{display:inline-flex;gap:8px;align-items:center;padding:7px 12px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-weight:700;font-size:13px}.hero h1{font-size:34px;letter-spacing:-.04em;margin:16px 0 10px}.hero p{color:var(--muted);font-size:15px;max-width:760px;line-height:1.7}.status-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.pill{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:7px 11px;font-weight:700;font-size:12px;border:1px solid var(--line);background:#fff}.pill.ok{color:var(--ok);background:#f0fdf4;border-color:#bbf7d0}.pill.warn{color:var(--warn);background:#fffbeb;border-color:#fed7aa}.pill.safe{color:#0369a1;background:#f0f9ff;border-color:#bae6fd}
+.control-card{padding:18px}.control-card h2{font-size:16px;margin:0 0 12px}.form-grid{display:grid;grid-template-columns:1fr;gap:10px}.field label{display:block;font-size:12px;font-weight:800;color:#475569;margin-bottom:5px}.field input,.field select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:14px;background:#fff;outline:none}.field input:focus,.field select:focus{border-color:#93c5fd;box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin:20px 0}.stat{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:var(--shadow-sm)}.stat .label{font-size:12px;color:var(--muted);font-weight:800}.stat .value{font-size:28px;font-weight:900;letter-spacing:-.04em;margin-top:6px}.stat .hint{font-size:12px;color:var(--muted);margin-top:4px}.stat.danger .value{color:var(--danger)}.stat.warn .value{color:var(--warn)}.stat.ok .value{color:var(--ok)}
+.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin:18px 0}.search{flex:1;min-width:260px;border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14px;background:#fff}.btn{border:0;border-radius:12px;padding:10px 13px;font-weight:800;cursor:pointer;background:#e2e8f0;color:#0f172a;transition:.15s transform,.15s box-shadow,.15s background}.btn:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}.btn.primary{background:var(--brand);color:#fff}.btn.primary:hover{background:var(--brand-dark)}.btn.ghost{background:#f8fafc;border:1px solid var(--line)}.btn.warn{background:#f59e0b;color:#fff}.btn.danger{background:#fee2e2;color:#991b1b}.btn.danger-solid{background:var(--danger);color:#fff}.btn.small{padding:8px 10px;font-size:12px}
+.panel{overflow:hidden}.panel-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#fff,#f8fafc)}.panel-head h2{margin:0;font-size:18px}.table-wrap{overflow:auto;max-height:680px}table{width:100%;border-collapse:separate;border-spacing:0}th,td{padding:14px 16px;text-align:left;border-bottom:1px solid #e8eef5;vertical-align:top}th{position:sticky;top:0;background:#f8fafc;z-index:1;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}tbody tr:hover{background:#f8fbff}.asset-name{font-weight:900}.asset-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#64748b;font-size:12px;margin-top:4px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.muted{color:var(--muted)}.reason{max-width:360px;line-height:1.55}.actions{display:flex;gap:7px;flex-wrap:wrap;min-width:280px}.chip{display:inline-flex;align-items:center;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:900}.chip.confirmed{background:#dcfce7;color:#166534}.chip.missing_confirmation{background:#fef3c7;color:#92400e}.chip.confirmed_wait_next_scheduled_run{background:#dbeafe;color:#1d4ed8}.chip.stale_confirmation,.chip.invalid_confirmation{background:#fee2e2;color:#991b1b}.chip.delete{background:#f3e8ff;color:#6d28d9}.empty{padding:56px;text-align:center;color:var(--muted)}.toast{position:fixed;right:24px;bottom:24px;z-index:20;border-radius:14px;padding:13px 15px;background:#0f172a;color:white;box-shadow:var(--shadow);max-width:460px}.toast.error{background:#991b1b}.drawer{position:fixed;inset:auto 24px 24px auto;width:min(760px,calc(100vw - 48px));max-height:72vh;overflow:auto;background:#0f172a;color:#e2e8f0;border-radius:18px;box-shadow:var(--shadow);padding:18px;z-index:15}.drawer pre{white-space:pre-wrap;font-size:12px}.hidden{display:none!important}.mobile-card{display:none}
+@media(max-width:980px){.shell{padding:16px}.hero{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.table-wrap{display:none}.mobile-card{display:block;padding:14px;border-bottom:1px solid var(--line)}.actions{min-width:auto}.toolbar{flex-direction:column;align-items:stretch}.hero h1{font-size:28px}}
+</style>
+</head>
 <body>
-<h1>JumpServer 废弃主机确认</h1>
-<p>本页面只维护本地确认/保护/复查清单，不直接调用 JumpServer API。</p>
-<p>写操作需要服务端配置的管理员 Token。</p>
-<label>管理员 Token <input id="token" type="password" autocomplete="off"></label>
-<label>操作人 <input id="operator" placeholder="admin"></label>
-<label>原因 <input id="reason" placeholder="确认废弃/保护/需复查原因"></label>
-<div id="summary" class="muted">加载中...</div>
-<table>
-  <thead><tr><th>主机</th><th>IP/节点</th><th>证据</th><th>状态</th><th>操作</th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
-<h2>原始 JSON</h2>
-<pre id="out"></pre>
+<div class="shell">
+  <section class="hero">
+    <div class="hero-card">
+      <span class="eyebrow">🛡️ JumpServer Cleanup Console</span>
+      <h1>废弃主机确认中心</h1>
+      <p>集中查看连续不可达资产，维护确认、保护和复查清单。页面只写本地状态文件，不直接调用 JumpServer 清理接口；真正清理由定时任务在下一轮正式巡检复核和存档后执行。</p>
+      <div class="status-row">
+        <span class="pill safe">浏览器不触达 JumpServer API</span>
+        <span class="pill warn">确认后需下一次巡检复核</span>
+        <span class="pill ok">Archive-before-mutate</span>
+      </div>
+    </div>
+    <div class="control-card">
+      <h2>管理员操作信息</h2>
+      <div class="form-grid">
+        <div class="field"><label for="token">管理员 Token</label><input id="token" type="password" autocomplete="off" placeholder="启动服务时配置的 CLEANUP_ADMIN_TOKEN"></div>
+        <div class="field"><label for="operator">操作人</label><input id="operator" placeholder="例如：admin / zhangsan"></div>
+        <div class="field"><label for="reason">处理原因</label><input id="reason" placeholder="例如：业务下线，负责人确认废弃"></div>
+        <div class="field"><label for="stateFilter">状态筛选</label><select id="stateFilter"><option value="">全部候选</option><option value="missing_confirmation">待确认</option><option value="confirmed">已确认可等待 apply</option><option value="confirmed_wait_next_scheduled_run">等待下次巡检</option><option value="stale_confirmation">确认已过期</option></select></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="stats" id="stats"></section>
+
+  <div class="toolbar">
+    <input class="search" id="search" placeholder="搜索资产名 / IP / 节点 / 失败原因">
+    <button class="btn ghost" id="refreshBtn">刷新候选</button>
+    <button class="btn ghost" id="rawBtn">查看 JSON</button>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>候选主机</h2><span class="muted" id="updatedAt">加载中...</span></div>
+    <div class="table-wrap"><table><thead><tr><th>资产</th><th>IP / 节点</th><th>证据 run</th><th>确认状态</th><th>失败原因</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div id="cards"></div>
+    <div class="empty hidden" id="empty">没有匹配的候选主机</div>
+  </section>
+</div>
+<div class="drawer hidden" id="drawer"><button class="btn small ghost" id="closeDrawer">关闭</button><pre id="out"></pre></div>
 <script>
-function esc(s){return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+let latestData={candidates:[],skipped:[],summary:{}};
+function esc(s){return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function authHeaders(){return {'Content-Type':'application/json','X-Cleanup-Admin-Token':document.getElementById('token').value};}
-function basePayload(c){return {
-  asset:{asset_id:c.asset_id,asset_name:c.asset_name,asset_ip:c.asset_ip},
-  asset_id:c.asset_id,
-  operator:document.getElementById('operator').value,
-  reason:document.getElementById('reason').value,
-  source_evidence_run_ids:c.evidence_run_ids || [],
-  source_evidence_paths:c.evidence_paths || []
-};}
-function postDecision(route, payload){
-  fetch(route,{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)})
-    .then(r => r.json().then(data => ({ok:r.ok,status:r.status,data})))
-    .then(res => { if(!res.ok){throw new Error(res.status + ' ' + JSON.stringify(res.data));} load(); })
-    .catch(err => alert(String(err)));
-}
-function confirmDisable(c){const p=basePayload(c);p.action='disable';postDecision('/api/confirm',p);}
-function confirmDelete(c){const p=basePayload(c);p.action='delete';p.delete_ack='DELETE '+c.asset_id;postDecision('/api/confirm',p);}
-function protect(c){postDecision('/api/protect',basePayload(c));}
-function review(c){postDecision('/api/review',basePayload(c));}
-function render(data){
-  document.getElementById('summary').textContent = `候选 ${data.summary?.candidates ?? 0} / 跳过 ${data.summary?.skipped ?? 0} / eligible runs ${data.summary?.eligible_runs ?? 0}`;
-  document.getElementById('rows').innerHTML = (data.candidates || []).map((c,i)=>`
-    <tr>
-      <td>${esc(c.asset_name)}<br><span class="muted">${esc(c.asset_id)}</span></td>
-      <td>${esc(c.asset_ip)}<br>${esc(c.node)}</td>
-      <td>${esc((c.evidence_run_ids||[]).join(', '))}<br><span class="muted">${esc(c.latest_reason)}</span></td>
-      <td class="${c.confirmation_state==='confirmed'?'ok':''}">${esc(c.confirmation_state)}<br><span class="danger">${esc(c.confirmation_reason||'')}</span></td>
-      <td>
-        <button data-action="confirm-disable" data-index="${i}">确认废弃并禁用</button>
-        <button data-action="protect" data-index="${i}">保护</button>
-        <button data-action="review" data-index="${i}">需复查</button>
-        <button data-action="confirm-delete" data-index="${i}" class="danger">危险：确认删除</button>
-      </td>
-    </tr>`).join('');
-  document.querySelectorAll('button[data-action]').forEach(btn => {
-    btn.onclick = () => {
-      const c = data.candidates[Number(btn.dataset.index)];
-      if(btn.dataset.action==='confirm-disable') confirmDisable(c);
-      if(btn.dataset.action==='confirm-delete') confirmDelete(c);
-      if(btn.dataset.action==='protect') protect(c);
-      if(btn.dataset.action==='review') review(c);
-    };
-  });
-}
-function load(){fetch('/api/candidates').then(r => r.json()).then(data => {
-  render(data);
-  document.getElementById('out').textContent = JSON.stringify(data, null, 2);
-}).catch(err => { document.getElementById('out').textContent = String(err); });}
-load();
+function toast(msg,error=false){const t=document.createElement('div');t.className='toast'+(error?' error':'');t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),4200);}
+function basePayload(c){return {asset:{asset_id:c.asset_id,asset_name:c.asset_name,asset_ip:c.asset_ip},asset_id:c.asset_id,operator:document.getElementById('operator').value.trim(),reason:document.getElementById('reason').value.trim(),source_evidence_run_ids:c.evidence_run_ids||[],source_evidence_paths:c.evidence_paths||[]};}
+function validateForm(){if(!document.getElementById('token').value.trim()) throw new Error('请先填写管理员 Token');if(!document.getElementById('operator').value.trim()) throw new Error('请填写操作人');if(!document.getElementById('reason').value.trim()) throw new Error('请填写处理原因');}
+function postDecision(route,payload,okMsg){try{validateForm();}catch(e){toast(e.message,true);return;}fetch(route,{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)}).then(r=>r.json().then(data=>({ok:r.ok,status:r.status,data}))).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));toast(okMsg);load();}).catch(err=>toast(String(err),true));}
+function confirmDisable(c){const p=basePayload(c);p.action='disable';postDecision('/api/confirm',p,'已写入确认废弃/禁用清单');}
+function confirmDelete(c){if(!confirm('删除是危险动作。这里只写入删除确认，真正 DELETE 仍需后续五重门控。继续？'))return;const p=basePayload(c);p.action='delete';p.delete_ack='DELETE '+c.asset_id;postDecision('/api/confirm',p,'已写入危险删除确认');}
+function protect(c){postDecision('/api/protect',basePayload(c),'已加入保护清单');}
+function review(c){postDecision('/api/review',basePayload(c),'已标记为需复查');}
+function statusChip(state){return `<span class="chip ${esc(state||'missing_confirmation')}">${esc(state||'missing_confirmation')}</span>`;}
+function filtered(){const q=document.getElementById('search').value.trim().toLowerCase();const sf=document.getElementById('stateFilter').value;return (latestData.candidates||[]).filter(c=>{const text=[c.asset_name,c.asset_id,c.asset_ip,c.node,c.latest_reason,c.confirmation_state,c.confirmation_reason].join(' ').toLowerCase();return (!q||text.includes(q))&&(!sf||c.confirmation_state===sf);});}
+function renderStats(){const c=latestData.candidates||[];const counts=c.reduce((m,x)=>(m[x.confirmation_state||'missing_confirmation']=(m[x.confirmation_state||'missing_confirmation']||0)+1,m),{});const s=latestData.summary||{};document.getElementById('stats').innerHTML=[['候选总数',s.candidates??c.length,'本轮满足两次证据窗口','warn'],['待确认',counts.missing_confirmation||0,'需要管理员判断','danger'],['已确认',counts.confirmed||0,'下次 apply 可继续门控','ok'],['等待复核',counts.confirmed_wait_next_scheduled_run||0,'确认后仍需下一轮巡检',''],['已跳过',s.skipped??0,'保护/证据不足等','']].map(([a,b,h,cls])=>`<div class="stat ${cls}"><div class="label">${a}</div><div class="value">${b}</div><div class="hint">${h}</div></div>`).join('');}
+function actionButtons(c,i){return `<div class="actions"><button class="btn primary small" data-action="confirm-disable" data-index="${i}">确认废弃并禁用</button><button class="btn warn small" data-action="protect" data-index="${i}">保护</button><button class="btn ghost small" data-action="review" data-index="${i}">需复查</button><button class="btn danger small" data-action="confirm-delete" data-index="${i}">危险：确认删除</button></div>`;}
+function bindActions(items){document.querySelectorAll('button[data-action]').forEach(btn=>{btn.onclick=()=>{const c=items[Number(btn.dataset.index)];if(btn.dataset.action==='confirm-disable')confirmDisable(c);if(btn.dataset.action==='confirm-delete')confirmDelete(c);if(btn.dataset.action==='protect')protect(c);if(btn.dataset.action==='review')review(c);};});}
+function render(){renderStats();const items=filtered();document.getElementById('empty').classList.toggle('hidden',items.length!==0);document.getElementById('rows').innerHTML=items.map((c,i)=>`<tr><td><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="asset-id">${esc(c.asset_id)}</div></td><td><div class="mono">${esc(c.asset_ip)}</div><div class="muted">${esc(c.node)}</div></td><td><div class="mono">${esc((c.evidence_run_ids||[]).join(' / '))}</div><div class="muted">${esc((c.evidence_paths||[]).slice(-1)[0]||'')}</div></td><td>${statusChip(c.confirmation_state)}<br><span class="muted">${esc(c.confirmation_reason||c.planned_action||'disable')}</span></td><td class="reason">${esc(c.latest_reason||'-')}</td><td>${actionButtons(c,i)}</td></tr>`).join('');document.getElementById('cards').innerHTML=items.map((c,i)=>`<article class="mobile-card"><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="muted mono">${esc(c.asset_ip)} · ${esc(c.node)}</div><p>${esc(c.latest_reason||'-')}</p>${statusChip(c.confirmation_state)}${actionButtons(c,i)}</article>`).join('');bindActions(items);document.getElementById('out').textContent=JSON.stringify(latestData,null,2);}
+function load(){document.getElementById('updatedAt').textContent='刷新中...';fetch('/api/candidates').then(r=>r.json()).then(data=>{latestData=data;document.getElementById('updatedAt').textContent='最近刷新 '+new Date().toLocaleString();render();}).catch(err=>{document.getElementById('updatedAt').textContent='加载失败';toast(String(err),true);});}
+document.getElementById('refreshBtn').onclick=load;document.getElementById('rawBtn').onclick=()=>document.getElementById('drawer').classList.remove('hidden');document.getElementById('closeDrawer').onclick=()=>document.getElementById('drawer').classList.add('hidden');document.getElementById('search').oninput=render;document.getElementById('stateFilter').onchange=render;load();
 </script>
 </body></html>
 """
@@ -248,9 +262,9 @@ def validate_bind_security(host: str, token: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local cleanup confirmation admin UI.")
-    parser.add_argument("--profile", default=profile_env.DEFAULT_PROFILE)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8088)
+    parser.add_argument("--profile", default=os.getenv("CLEANUP_ADMIN_PROFILE", profile_env.DEFAULT_PROFILE))
+    parser.add_argument("--host", default=os.getenv("CLEANUP_ADMIN_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("CLEANUP_ADMIN_PORT", "8088")))
     parser.add_argument("--raw-dir", default="")
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--output-dir", default="")

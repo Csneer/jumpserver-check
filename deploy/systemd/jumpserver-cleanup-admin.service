@@ -1,0 +1,21 @@
+[Unit]
+Description=JumpServer abandoned-host cleanup admin UI
+Documentation=https://github.com/Csneer/jumpserver-check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/jumpserver-check
+EnvironmentFile=-/root/jumpserver-check/.env
+ExecStart=/bin/sh -c 'exec /usr/bin/python3 scripts/cleanup_admin_server.py --profile "${CLEANUP_ADMIN_PROFILE:-local}" --host "${CLEANUP_ADMIN_HOST:-127.0.0.1}" --port "${CLEANUP_ADMIN_PORT:-8088}"'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/root/jumpserver-check/artifacts
+
+[Install]
+WantedBy=multi-user.target

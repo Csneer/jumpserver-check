@@ -29,10 +29,24 @@ def test_index_page_has_interactive_decision_buttons():
     )
 
     body = response.body.decode("utf-8")
+    assert "Cleanup Console" in body
+    assert "废弃主机确认中心" in body
     assert "确认废弃并禁用" in body
     assert "保护" in body
     assert "需复查" in body
+    assert "stateFilter" in body
     assert "/api/confirm" in body
+
+
+def test_health_and_favicon_routes(tmp_path):
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="")
+
+    health = admin.handle_request("GET", "/api/health", {}, b"", context)
+    favicon = admin.handle_request("GET", "/favicon.ico", {}, b"", context)
+
+    assert health.status == 200
+    assert json.loads(health.body) == {"status": "ok", "profile": "local"}
+    assert favicon.status == 204
 
 
 def test_write_endpoints_require_token(tmp_path):
