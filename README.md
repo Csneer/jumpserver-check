@@ -302,11 +302,15 @@ CLEANUP_ADMIN_TOKEN=replace-with-local-token \
 python scripts/cleanup_admin_server.py --profile local --host 127.0.0.1 --port 8088
 ```
 
+页面默认会要求先登录，登录口令就是服务端配置的 `CLEANUP_ADMIN_TOKEN`。登录前不会加载候选主机、原始 JSON 或多 JumpServer profile 列表；登录后可以在页面右侧选择 JumpServer 配置分别查看各自的废弃候选。profile 来源包括启动参数 `--profile`、`CLEANUP_ADMIN_PROFILES` / `--profiles` 显式白名单，以及 `configs/profiles/*.env` 中发现的配置文件。
+
 长期运行建议使用 systemd 服务。先在 `.env` 中配置：
 
 ```env
 CLEANUP_ADMIN_TOKEN=replace-with-a-strong-token
 CLEANUP_ADMIN_PROFILE=local
+# 可选：额外允许展示的 JumpServer 配置，逗号分隔；configs/profiles/*.env 也会自动发现。
+CLEANUP_ADMIN_PROFILES=prod-a,prod-b
 CLEANUP_ADMIN_HOST=127.0.0.1
 CLEANUP_ADMIN_PORT=8088
 ```
@@ -318,7 +322,7 @@ sudo bash scripts/install_cleanup_admin_service.sh
 sudo systemctl status jumpserver-cleanup-admin.service
 ```
 
-默认监听 `127.0.0.1:8088`，推荐通过 SSH 端口转发访问；如果要直接访问 `http://<server>:8088/`，可将 `CLEANUP_ADMIN_HOST=0.0.0.0`，但必须配置强 token。
+默认监听 `127.0.0.1:8088`，推荐通过 SSH 端口转发访问；如果要直接访问 `http://<server>:8088/`，可将 `CLEANUP_ADMIN_HOST=0.0.0.0`，但必须配置强 token。写入确认、保护、复查清单时会沿用当前页面选择的 profile，并写入该 profile 对应的本地状态目录。如果启动时显式传入 `--raw-dir` / `--state-dir` / `--output-dir`，非默认 profile 会自动使用这些基目录下的同名子目录，避免多套 JumpServer 混用同一份证据或状态文件。
 
 定时巡检如需产出可用于清理的正式证据，应显式标记来源：
 
