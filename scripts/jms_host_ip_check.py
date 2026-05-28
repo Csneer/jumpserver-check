@@ -317,6 +317,12 @@ class JumpServerClient:
     def post(self, path: str, body: Any, timeout: int = 20) -> tuple[int, Any]:
         return self.request("POST", path, body=body, timeout=timeout)
 
+    def patch(self, path: str, body: Any, timeout: int = 20) -> tuple[int, Any]:
+        return self.request("PATCH", path, body=body, timeout=timeout)
+
+    def delete(self, path: str, timeout: int = 20) -> tuple[int, Any]:
+        return self.request("DELETE", path, timeout=timeout)
+
 def compact(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -1368,7 +1374,16 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_reports(results: list[dict[str, Any]], batches: list[dict[str, Any]], started_at: dt.datetime, output_dir: Path, raw_output_dir: Path, retention_count: int, summary: dict[str, Any]) -> dict[str, str]:
+def write_reports(
+    results: list[dict[str, Any]],
+    batches: list[dict[str, Any]],
+    started_at: dt.datetime,
+    output_dir: Path,
+    raw_output_dir: Path,
+    retention_count: int,
+    summary: dict[str, Any],
+    run_metadata: dict[str, Any] | None = None,
+) -> dict[str, str]:
     finished_at = dt.datetime.now().astimezone()
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1387,6 +1402,8 @@ def write_reports(results: list[dict[str, Any]], batches: list[dict[str, Any]], 
         "results": results,
         "batches": batches,
     }
+    if run_metadata:
+        raw_payload.update(run_metadata)
     raw_path.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     prune_old_reports(output_dir, retention_count)
     return {"report": str(report_path), "latest": str(latest_path), "raw": str(raw_path)}
@@ -1512,6 +1529,12 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
         Path(args.raw_output_dir),
         args.retention_count,
         summary,
+        run_metadata={
+            "run_id": getattr(args, "run_id", "") or started_at.strftime("%Y%m%d-%H%M%S"),
+            "profile": getattr(args, "profile", "default"),
+            "run_source": getattr(args, "run_source", "manual"),
+            "cleanup_evidence_eligible": bool(getattr(args, "cleanup_evidence_eligible", False)),
+        },
     )
     if can_resume and batch_records and all("results" in record for record in batch_records):
         mark_resume_state(resume_state_path, "parsed", paths)
@@ -1550,6 +1573,19 @@ def main() -> None:
     detect.add_argument("--raw-output-dir", default="artifacts/raw")
     detect.add_argument("--retention-count", type=int, default=12)
     detect.add_argument("--runas", default="root")
+    detect.add_argument("--profile", default="default", help="profile name recorded in raw provenance")
+    detect.add_argument("--run-id", default="", help="stable workflow run id recorded in raw provenance")
+    detect.add_argument(
+        "--run-source",
+        choices=("weekly_scheduled", "manual", "dry_run", "tmp_probe"),
+        default="manual",
+        help="source classification recorded in raw provenance; only weekly_scheduled can be cleanup evidence",
+    )
+    detect.add_argument(
+        "--cleanup-evidence-eligible",
+        action="store_true",
+        help="mark this detect raw output as eligible evidence for cleanup evaluation",
+    )
     detect.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="resume an unparsed all-in-one batch Ops task when possible")
     detect.add_argument("--resume-state", default=DEFAULT_RESUME_STATE, help="path to local inflight task state")
 

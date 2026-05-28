@@ -177,3 +177,22 @@ def test_notify_raises_when_send_fails(monkeypatch):
 
     with pytest.raises(RuntimeError, match="bad webhook"):
         notify.notify("success", "title")
+
+
+def test_build_markdown_message_includes_cleanup_summary():
+    message = notify.build_markdown_message(
+        "success",
+        "巡检",
+        {
+            "summary": {"total_assets": 1, "linux_assets": 1, "unauthorized_assets": 0},
+            "status_counts": {},
+            "cleanup": {
+                "plan": {"summary": {"candidates": 2, "skipped": 1}, "plan_path": "artifacts/cleanup/local/plan.json"},
+                "apply": {"results": [{"status": "disabled"}], "result_path": "artifacts/cleanup/local/result.json"},
+            },
+        },
+    )
+
+    assert "清理候选" in message
+    assert "候选 2 / 跳过 1 / 执行结果 1" in message
+    assert "artifacts/cleanup/local/plan.json" in message

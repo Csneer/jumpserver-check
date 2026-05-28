@@ -9,13 +9,14 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import preflight_check, profile_env, wecom_notify, yuque_markdown_sync  # noqa: E402
+from scripts import host_cleanup, preflight_check, profile_env, wecom_notify, yuque_markdown_sync  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -77,10 +78,18 @@ def run_detect_subprocess(args: argparse.Namespace, timeout_seconds: int) -> dic
             args.raw_output_dir,
             "--retention-count",
             str(args.retention_count),
+            "--profile",
+            args.profile,
+            "--run-id",
+            getattr(args, "run_id", ""),
+            "--run-source",
+            getattr(args, "run_source", "manual"),
             "--resume-state",
             args.resume_state,
         ]
     )
+    if getattr(args, "cleanup_evidence_eligible", False):
+        command.append("--cleanup-evidence-eligible")
     if args.no_resume:
         command.append("--no-resume")
     if args.query:
@@ -140,12 +149,35 @@ def build_notify_summary(detect_result: dict[str, Any] | None) -> dict[str, Any]
     }
 
 
+def run_cleanup_steps(args: argparse.Namespace, detect_result: dict[str, Any] | None) -> dict[str, Any]:
+    if not (getattr(args, "cleanup_evaluate", False) or getattr(args, "cleanup_apply_confirmed", False)):
+        return {"status": "skipped", "reason": "cleanup not requested"}
+    raw_dir = Path(args.raw_output_dir)
+    state_dir = host_cleanup.cleanup_profile_state_dir(args.profile)
+    output_dir = host_cleanup.cleanup_output_dir(args.profile)
+    plan = host_cleanup.evaluate_cleanup(args.profile, raw_dir, state_dir, output_dir, write_plan=True)
+    result: dict[str, Any] | None = None
+    if getattr(args, "cleanup_apply_confirmed", False):
+        result = host_cleanup.apply_cleanup_plan(
+            plan,
+            profile=args.profile,
+            state_dir=state_dir,
+            output_dir=output_dir,
+            dry_run=getattr(args, "cleanup_dry_run", False),
+            allow_delete=getattr(args, "cleanup_allow_delete", False),
+        )
+    return {"status": "completed", "plan": plan, "apply": result}
+
+
 def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     started = time.time()
     load_dotenv()
+    if not getattr(args, "run_id", ""):
+        args.run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     detect_result: dict[str, Any] | None = None
     yuque_result: dict[str, Any] | None = None
     notify_result: dict[str, Any] | None = None
+    cleanup_result: dict[str, Any] | None = None
     status = "success"
     error_message = ""
     report_path = ""
@@ -182,6 +214,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
                 dry_run=False,
             )
         yuque_url = str((yuque_result or {}).get("url") or "")
+        cleanup_result = run_cleanup_steps(args, detect_result)
     except TimeoutError as exc:
         status = "timeout"
         error_message = str(exc)
@@ -194,6 +227,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
 
     duration = time.time() - started
     notify_summary = build_notify_summary(detect_result)
+    if cleanup_result and cleanup_result.get("status") != "skipped":
+        notify_summary["cleanup"] = cleanup_result
     try:
         notify_result = wecom_notify.notify(
             status=status,
@@ -211,6 +246,9 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
 
     record = {
         "profile": args.profile,
+        "run_id": args.run_id,
+        "run_source": getattr(args, "run_source", "manual"),
+        "cleanup_evidence_eligible": bool(getattr(args, "cleanup_evidence_eligible", False)),
         "env_file": runtime_env.env_file if "runtime_env" in locals() else args.env_file,
         "loaded_env_files": runtime_env.loaded_files if "runtime_env" in locals() else [],
         "status": status,
@@ -219,6 +257,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "detect": detect_result,
         "yuque": yuque_result,
         "wecom": notify_result,
+        "cleanup": cleanup_result,
     }
     record_path = write_workflow_record(record, PROJECT_ROOT / profile_env.profile_path("artifacts/workflow", args.profile))
     record["workflow_record"] = str(record_path)
@@ -246,6 +285,13 @@ def parse_args() -> argparse.Namespace:
         default=str(PROJECT_ROOT / profile_env.profile_path("artifacts/state", profile) / "jms-host-ip-check-inflight.json"),
     )
     parser.add_argument("--retention-count", type=int, default=env_int("CHECK_RETENTION_COUNT", 12))
+    parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--run-source",
+        choices=("weekly_scheduled", "manual", "dry_run", "tmp_probe"),
+        default=os.getenv("CHECK_RUN_SOURCE", "manual"),
+    )
+    parser.add_argument("--cleanup-evidence-eligible", action="store_true")
     parser.add_argument("--query", default="")
     parser.add_argument("--max-assets", type=int)
     parser.add_argument("--yuque-title", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_TITLE", DEFAULT_TITLE))
@@ -258,6 +304,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
+    parser.add_argument("--cleanup-evaluate", action="store_true", help="巡检后生成废弃主机清理候选计划")
+    parser.add_argument("--cleanup-apply-confirmed", action="store_true", help="巡检后对已确认废弃且通过门控的资产执行清理")
+    parser.add_argument("--cleanup-dry-run", action="store_true", help="清理 apply 只演练，不调用 JumpServer mutation API")
+    parser.add_argument("--cleanup-allow-delete", action="store_true", help="允许通过五重门控的 delete 动作")
     parser.add_argument("--require-wecom", action="store_true", help="强制要求 WECOM_WEBHOOK_URL 已配置")
     parser.add_argument("--no-resume", action="store_true", help="不接续未解析的 JumpServer Ops job，强制新建任务")
     return parser.parse_args()

@@ -1,9 +1,9 @@
 # SOP：JumpServer 主机存活探测与 IP 配置类型检测
 
-**版本**：v1.0  
+**版本**：v1.1  
 **适用系统**：JumpServer v3.x+  
 **目标系统**：Linux（Windows 主机跳过）  
-**更新日期**：2025-05
+**更新日期**：2026-05
 
 ---
 
@@ -19,6 +19,7 @@
 8. [阶段五：解析输出与分类](#8-阶段五解析输出与分类)
 9. [阶段六：结果处置](#9-阶段六结果处置)
 10. [阶段七：汇总报告](#10-阶段七汇总报告)
+   - [10.7 废弃主机确认与自动清理（方案）](#107-废弃主机确认与自动清理方案)
 11. [异常处理规范](#11-异常处理规范)
 12. [配置参数参考](#12-配置参数参考)
 13. [附录](#13-附录)
@@ -34,6 +35,8 @@
 - **连通性检测**：判断主机是否可正常通过 JumpServer 建立 SSH 连接。
 - **IP 配置类型检测**：判断主机当前使用的是固定 IP（static）还是动态分配（DHCP），识别存在网段隐患的主机。
 
+在此基础上，文档还定义“废弃主机确认与自动清理”的扩展方案：先由巡检识别异常主机，再由共同维护的轻量确认页面完成人工确认，最后由下一次定时任务在满足证据门槛时自动存档并清理 JumpServer 资产。
+
 ### 1.2 范围说明
 
 | 条目 | 说明 |
@@ -43,9 +46,22 @@
 | 触发方式 | 定时执行（建议每周一次）或运维手动触发 |
 | 所需权限 | JumpServer API Key（需有资产读权限 + Ops 执行权限） |
 | 报告流向 | 本地 `reports/yuque/` + 语雀时间戳文档 + 企业微信摘要 |
+| 清理模式 | 默认只读；废弃主机清理仅在显式确认后进入自动执行 |
+
+### 1.3.1 设计原则
+
+- **默认只读**：巡检主流程不修改 JumpServer 资产状态。
+- **确认先行**：任何清理动作都必须先有管理员在确认页上完成废弃确认。
+- **证据门控**：同一资产至少需要两次定时巡检均不可达，且状态持续一致，才可进入自动清理候选。
+- **存档优先**：清理前必须先生成可追溯的本地存档记录，存档失败则禁止清理。
+- **动作分级**：优先支持“禁用/归档”这类可逆动作；删除资产作为显式选项保留。
+
+### 1.4 扩展边界
+
+废弃主机自动清理属于独立扩展链路，不改变现有只读巡检的默认行为。若未启用确认页、未写入确认清单或未通过清理门槛，系统仅输出异常报告，不应对 JumpServer 资产做任何修改。
 
 
-### 1.3 流程图
+### 1.5 流程图
 
 ```text
 初始化鉴权
@@ -466,7 +482,7 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 人工确认后再执行任何资产状态变更
 ```
 
-> ⚠️ 本项目不自动修改 JumpServer 资产状态，不自动禁用主机，不执行整改命令。连续失败判断、工单流转和资产状态变更应由外部运维流程在人工确认后完成。
+> ⚠️ 默认巡检链路不自动修改 JumpServer 资产状态，不自动禁用主机，不执行整改命令。只有显式启用废弃主机清理扩展，并满足管理员确认、下一次正式巡检复核、保护清单排除、存档成功等门控后，才允许执行清理动作。
 
 ### 9.2 DHCP 主机处置建议
 
@@ -597,6 +613,123 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 
 默认总流程超时 1200 秒。超时、失败、成功都会尝试推送企业微信通知。
 
+### 10.7 废弃主机确认与自动清理（方案）
+
+本节定义一个与现有只读巡检并行的扩展流程：由前端页面共同维护“废弃主机确认清单”，再由下一次定时任务自动判断并执行清理。该功能的目标不是“看到一次不可达就删除”，而是“**两次定时任务均不可访问 + 管理员已明确确认废弃 + 清理前存档成功**”后再自动处置。
+
+#### 10.7.1 交互与角色
+
+- **巡检系统**：继续输出异常主机、失败原因、证据文件路径，不直接清理。
+- **轻量前端页面**：展示待确认异常主机，允许管理员执行以下动作：
+  - 确认为废弃并允许自动清理
+  - 暂不清理，稍后复查
+  - 加入保护清单，禁止自动清理
+  - 标记为需人工核查
+- **管理员确认清单**：由页面写入本地可审计状态文件，作为下次定时任务的自动清理前提。
+
+#### 10.7.2 候选判定规则
+
+只有同时满足以下条件的资产，才进入自动清理候选：
+
+1. 同一 `asset_id` 在最近两次**定时巡检**中均被判定为 `unreachable`。
+2. 两次巡检均来自正式调度，不是手工测试、dry-run 或临时验证。
+3. 巡检结果中的 `asset_ip`、`asset_name` 未发生需要人工复核的突变。
+4. 该资产不在保护清单中。
+5. 管理员已在确认页面将其标记为“确认废弃”，且确认记录包含确认人、原因、来源 run_id 与证据路径。
+6. 确认后必须再等待下一次正式定时巡检；如果最新证据仍来自确认时使用的 run_id，则状态为 `confirmed_wait_next_scheduled_run`，不得 apply。
+7. 清理动作所需的本地存档已成功生成。
+
+以下情形一律不应自动清理：
+
+- 仅一次不可达
+- `permission_denied`
+- `no_account`
+- `manual_check`
+- `probe_timeout`
+- `parse_error`
+- `ops_task_failed` 但缺少主机级不可达证据
+
+#### 10.7.3 前端页面的数据展示
+
+页面至少展示下列信息，供管理员确认：
+
+| 字段 | 说明 |
+|------|------|
+| `asset_id` | JumpServer 资产 ID |
+| `asset_name` | 资产名称 |
+| `asset_ip` | 资产 IP |
+| `node` | 所属节点 / 分组 |
+| `latest_status` | 最近一次巡检状态 |
+| `failure_count` | 连续不可达次数 |
+| `latest_reason` | 最近一次失败原因 |
+| `last_seen_at` | 最近一次巡检时间 |
+| `evidence_paths` | 最近两次巡检原始 JSON / 日志路径 |
+| `confirmation_state` | 待确认 / 已确认 / 已保护 / 需复查 / 已清理 |
+
+页面操作只写入 `artifacts/state/<profile>/cleanup_confirmed_hosts.json`、`cleanup_protected_hosts.json` 或 `cleanup_review_hosts.json`，不直接执行删除/禁用。确认表单应要求管理员填写：
+
+- 确认人
+- 废弃原因
+- 参考工单 / 备注（可选）
+- 期望清理动作：默认禁用（`PATCH /api/v1/assets/assets/{id}/ {"is_active": false}`）或危险删除（必须附带 `delete_ack="DELETE <asset_id>"`）
+
+#### 10.7.4 存档要求
+
+在执行清理前，必须先生成本地存档记录，存档内容至少包括：
+
+- 资产快照：`asset_id`、`asset_name`、`asset_ip`、`node`、JumpServer 当前返回的关键字段
+- 两次巡检证据：原始 JSON 路径、任务日志路径、不可达摘要
+- 管理员确认记录：确认人、确认时间、确认原因、动作选择
+- 清理计划记录：预期动作、执行来源、计划生成时间
+- 清理结果记录：执行时间、执行成功/失败、JumpServer 返回信息摘要
+
+不要求存档密码、私钥或其他敏感凭据，只保留必要的审计材料即可。
+
+#### 10.7.5 自动清理执行顺序
+
+建议的执行顺序如下：
+
+```text
+读取最近两次巡检结果
+  -> 校验同一资产连续不可达
+  -> 读取确认清单
+  -> 校验管理员已确认废弃
+  -> 确认后等待下一次正式定时巡检仍不可达
+  -> apply 前重新 evaluate，防止旧 plan 绕过保护清单/确认变更
+  -> 读取保护清单并排除保护资产
+  -> GET 当前资产详情并校验 id/name/ip/is_active 未危险变化
+  -> 先写入 archive
+  -> 再执行清理动作
+  -> 写入 cleanup result
+  -> 更新前端页面状态与通知摘要
+```
+
+若任一步失败，则停止后续清理，仅保留证据和失败原因，不得跳过存档直接执行删除。
+
+#### 10.7.6 清理动作分级
+
+为降低误删风险，建议把清理动作分成两级：
+
+| 动作 | 说明 | 默认建议 |
+|------|------|----------|
+| 禁用 | `PATCH is_active=false`，资产保留记录，但不再参与巡检 | 推荐默认 |
+| 删除资产 | 从 JumpServer 中移除资产记录 | 仅在显式选择时使用 |
+
+在非生产环境中可以保留删除能力，但页面默认按钮仍应优先给出“禁用/归档”，将“删除”作为更谨慎的显式选项。
+
+#### 10.7.7 通知与审计
+
+企业微信或报告摘要中应明确输出：
+
+- 本轮发现的废弃候选数量
+- 已确认待清理数量
+- 已存档数量
+- 已清理数量
+- 被保护或跳过的原因
+- 存档路径
+
+这样可以确保“确认过什么、何时清理、为什么清理、清理前看到了什么证据”都能回溯。
+
 ---
 
 ## 11. 异常处理规范
@@ -640,6 +773,9 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 | 语雀同步 | API 失败或配置缺失 | 流程标记失败，企业微信推送失败摘要 |
 | 企业微信通知 | Webhook 未配置 | 记录 skipped，不影响主流程状态 |
 | 企业微信通知 | Webhook 返回错误 | 记录通知失败，不覆盖探测/语雀原始状态 |
+| 废弃主机清理 | 确认清单缺失 / 保护清单命中 | 跳过清理，仅保留异常报告 |
+| 废弃主机清理 | 存档失败 | 终止清理，不可直接删除 |
+| 废弃主机清理 | JumpServer 返回失败 | 记录清理失败，保留 archive 与计划记录 |
 
 `run_weekly_check.py` 会在下发 JumpServer Ops 前自动执行 preflight。若配置缺失或仍是占位值，流程会直接失败并尝试推送失败通知，不会创建 Ops job。
 
@@ -672,6 +808,18 @@ report:
 notification:
   wecom_webhook_url: "${WECOM_WEBHOOK_URL}"
   notify_on: always
+
+cleanup:
+  enabled: false                # 默认关闭；仅在明确启用后才允许自动清理
+  confirmation_source: "./artifacts/state/<profile>/cleanup_confirmed_hosts.json"
+  protection_source: "./artifacts/state/<profile>/cleanup_protected_hosts.json"
+  review_source: "./artifacts/state/<profile>/cleanup_review_hosts.json"
+  archive_dir: "./artifacts/cleanup/<profile>/archive"
+  candidate_window: 2           # 连续两次定时巡检都不可达才允许进入候选
+  default_action: "disable"
+  destructive_action: "delete"  # 仅在显式选择时允许
+  require_archive_before_apply: true
+  require_admin_confirmation: true
 
 yuque:
   token: "${YUQUE_TOKEN}"
@@ -745,3 +893,34 @@ duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  unreachable  >  prob
 - **分页拉取**：封装为通用方法，可复用于其他资源拉取（系统用户、节点等）。
 - **轮询逻辑**：封装为通用 `wait_for_task(task_id, timeout)` 方法，与任务类型解耦。
 - **通知模块**：若现有项目已有 Webhook/邮件通知，直接引用，不重复实现。
+
+### 附录 E：废弃主机确认清单建议结构
+
+建议使用本地 JSON 文件维护管理员确认状态，便于与定时任务共享：
+
+```json
+{
+  "confirmed_hosts": [
+    {
+      "asset_id": "fbdf61b2-0626-4752-b7ab-c9573bc8e863",
+      "asset_name": "101-101-lyy-sit-common-rabbitmq-02",
+      "asset_ip": "192.168.101.101",
+      "decision": "confirmed_decommissioned",
+      "operator": "admin",
+      "confirmed_at": "2026-05-27T10:30:00+08:00",
+      "reason": "业务已下线，主机废弃",
+      "cleanup_action": "disable",
+      "source_evidence_run_ids": ["20260520-090000-a1b2c3d4", "20260527-090000-e5f6g7h8"],
+      "source_evidence_paths": ["artifacts/raw/local/jumpserver-host-ip-check-20260520.json", "artifacts/raw/local/jumpserver-host-ip-check-20260527.json"]
+    }
+  ],
+  "protected_hosts": [
+    {
+      "asset_id": "....",
+      "reason": "保留资产"
+    }
+  ]
+}
+```
+
+页面只更新这些 profile-scoped 状态清单，不直接触发删除/禁用。定时任务在读取清单后，会重新结合最近两次 eligible scheduled raw 证据做最终清理判定；确认后未经历下一次正式巡检时必须跳过。

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import subprocess
 from pathlib import Path
 
@@ -925,3 +926,53 @@ def test_run_detect_skips_non_linux_assets_without_ops_submission(monkeypatch, t
     assert result["summary"]["linux_assets"] == 1
     assert result["summary"]["unsupported_assets"] == 1
     assert result["status_counts"] == {"skipped_non_linux": 1, "ok_static": 1}
+
+
+def test_jumpserver_client_patch_and_delete_use_signed_methods(monkeypatch):
+    captured = []
+
+    def fake_request(self, method, path, params=None, body=None, timeout=20, retries=None):
+        captured.append({"method": method, "path": path, "body": body, "timeout": timeout, "retries": retries})
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(check.JumpServerClient, "request", fake_request)
+    client = object.__new__(check.JumpServerClient)
+
+    assert client.patch("/api/v1/assets/assets/asset-1/", {"is_active": False}) == (200, {"ok": True})
+    assert client.delete("/api/v1/assets/assets/asset-1/") == (200, {"ok": True})
+
+    assert captured[0] == {
+        "method": "PATCH",
+        "path": "/api/v1/assets/assets/asset-1/",
+        "body": {"is_active": False},
+        "timeout": 20,
+        "retries": None,
+    }
+    assert captured[1]["method"] == "DELETE"
+    assert captured[1]["path"] == "/api/v1/assets/assets/asset-1/"
+
+
+def test_write_reports_includes_cleanup_provenance(tmp_path: Path):
+    started = check.dt.datetime(2026, 5, 28, 9, 0, tzinfo=check.dt.timezone.utc)
+    paths = check.write_reports(
+        [],
+        [],
+        started,
+        tmp_path / "reports",
+        tmp_path / "raw",
+        12,
+        {"total_assets": 0},
+        run_metadata={
+            "run_id": "run-1",
+            "profile": "local",
+            "run_source": "weekly_scheduled",
+            "cleanup_evidence_eligible": True,
+        },
+    )
+
+    payload = json.loads(Path(paths["raw"]).read_text(encoding="utf-8"))
+
+    assert payload["run_id"] == "run-1"
+    assert payload["profile"] == "local"
+    assert payload["run_source"] == "weekly_scheduled"
+    assert payload["cleanup_evidence_eligible"] is True

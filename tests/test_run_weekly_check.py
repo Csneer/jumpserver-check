@@ -1,4 +1,5 @@
 import argparse
+import json
 import time
 
 from scripts import run_weekly_check as weekly
@@ -15,6 +16,9 @@ def make_args(**overrides):
         "raw_output_dir": "artifacts/raw",
         "resume_state": "artifacts/state/jms-host-ip-check-inflight.json",
         "retention_count": 12,
+        "run_id": "",
+        "run_source": "manual",
+        "cleanup_evidence_eligible": False,
         "query": "",
         "max_assets": None,
         "yuque_title": "Report",
@@ -24,6 +28,10 @@ def make_args(**overrides):
         "notify_title": "Notify",
         "dry_run_yuque": False,
         "dry_run_notify": False,
+        "cleanup_evaluate": False,
+        "cleanup_apply_confirmed": False,
+        "cleanup_dry_run": False,
+        "cleanup_allow_delete": False,
         "require_wecom": False,
         "no_resume": False,
     }
@@ -200,3 +208,56 @@ def test_run_detect_subprocess_passes_profile_resume_state(monkeypatch):
     command = captured["command"]
     assert "--resume-state" in command
     assert command[command.index("--resume-state") + 1] == "artifacts/state/prod/jms-host-ip-check-inflight.json"
+
+
+def test_run_detect_subprocess_passes_cleanup_provenance_flags(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return '{"summary": {}, "paths": {}, "status_counts": {}, "run_id": "run-1"}', ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(weekly.subprocess, "Popen", fake_popen)
+
+    weekly.run_detect_subprocess(
+        make_args(run_id="run-1", run_source="weekly_scheduled", cleanup_evidence_eligible=True),
+        timeout_seconds=1,
+    )
+
+    command = captured["command"]
+    assert "--run-id" in command
+    assert command[command.index("--run-id") + 1] == "run-1"
+    assert "--run-source" in command
+    assert command[command.index("--run-source") + 1] == "weekly_scheduled"
+    assert "--cleanup-evidence-eligible" in command
+
+
+def test_run_workflow_cleanup_evaluate_records_summary(monkeypatch, tmp_path):
+    latest = tmp_path / "latest.md"
+    latest.write_text("# report", encoding="utf-8")
+    detect = {"summary": {}, "paths": {"latest": str(latest), "raw": str(tmp_path / "raw.json")}, "status_counts": {}}
+    cleanup_plan = {"summary": {"candidates": 1, "skipped": 0}, "plan_path": str(tmp_path / "plan.json"), "candidates": []}
+    notify_calls = []
+
+    monkeypatch.setattr(weekly, "run_detect_subprocess", lambda args, timeout: detect)
+    monkeypatch.setattr(weekly, "load_runtime_env", lambda profile, env_file: type("Env", (), {"env_file": "", "loaded_files": []})())
+    monkeypatch.setattr(weekly.preflight_check, "validate_config", lambda require_wecom=False, profile="default", env_file="": {"ok": True, "errors": []})
+    monkeypatch.setattr(weekly.yuque_markdown_sync, "sync_markdown", lambda *args, **kwargs: {"url": "https://yuque/doc"})
+    monkeypatch.setattr(weekly.host_cleanup, "evaluate_cleanup", lambda *args, **kwargs: cleanup_plan)
+    monkeypatch.setattr(weekly.wecom_notify, "notify", lambda **kwargs: notify_calls.append(kwargs) or {"status": "sent"})
+    monkeypatch.setattr(weekly, "write_workflow_record", lambda record, output_dir: tmp_path / "workflow.json")
+
+    record = weekly.run_workflow(make_args(cleanup_evaluate=True, raw_output_dir=str(tmp_path / "raw")))
+
+    assert record["cleanup"]["plan"]["summary"]["candidates"] == 1
+    summary = json.loads(notify_calls[0]["summary_json"])
+    assert summary["cleanup"]["plan"]["plan_path"] == str(tmp_path / "plan.json")

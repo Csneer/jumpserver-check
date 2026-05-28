@@ -57,3 +57,34 @@ def test_run_multi_continues_when_one_profile_fails(monkeypatch):
     assert calls == ["prod", "test", "pre"]
     assert result["status"] == "failed"
     assert [item["profile"] for item in result["profiles"]] == ["prod", "test", "pre"]
+
+
+def test_build_profile_command_passes_cleanup_flags():
+    args = type(
+        "Args",
+        (),
+        {
+            "no_proxy": False,
+            "require_wecom": False,
+            "dry_run_yuque": False,
+            "dry_run_notify": False,
+            "no_resume": False,
+            "wait_timeout": None,
+            "poll_interval": None,
+            "cleanup_evaluate": True,
+            "cleanup_apply_confirmed": True,
+            "cleanup_dry_run": True,
+            "cleanup_allow_delete": True,
+            "run_source": "weekly_scheduled",
+            "cleanup_evidence_eligible": True,
+        },
+    )()
+
+    command = multi.build_profile_command(args, "local")
+
+    assert "--cleanup-evaluate" in command
+    assert "--cleanup-apply-confirmed" in command
+    assert "--cleanup-dry-run" in command
+    assert "--cleanup-allow-delete" in command
+    assert command[command.index("--run-source") + 1] == "weekly_scheduled"
+    assert "--cleanup-evidence-eligible" in command

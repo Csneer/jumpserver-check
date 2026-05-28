@@ -124,6 +124,24 @@ def build_markdown_message(
             f"{status_count_label(key)}: {status_counts.get(key, 0)}" for key in ordered if status_counts.get(key, 0)
         )
         lines.extend(["", f"- 分类：{count_text or '无异常分类'}"])
+    cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
+    if cleanup:
+        plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
+        apply = cleanup.get("apply") if isinstance(cleanup.get("apply"), dict) else {}
+        plan_summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
+        apply_results = apply.get("results") if isinstance(apply.get("results"), list) else []
+        lines.extend(
+            [
+                "",
+                "- 清理候选："
+                f"候选 {plan_summary.get('candidates', 0)} / 跳过 {plan_summary.get('skipped', 0)}"
+                + (f" / 执行结果 {len(apply_results)}" if apply else ""),
+            ]
+        )
+        if plan.get("plan_path"):
+            lines.append(f"- 清理计划：`{plan.get('plan_path')}`")
+        if apply.get("result_path"):
+            lines.append(f"- 清理结果：`{apply.get('result_path')}`")
     if yuque_url:
         lines.append(f"- 语雀：[{yuque_url}]({yuque_url})")
     if report_path:

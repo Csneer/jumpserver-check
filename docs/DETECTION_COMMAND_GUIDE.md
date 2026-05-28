@@ -79,3 +79,20 @@ python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --d
 - 多 IP 主机不因默认路由 IP 不同被误判为 `ip_mismatch`。
 - Docker 默认 `172.17.*` 地址不出现在最终 `探测IP列表`，合法 `172.16.0.0/12` 主机地址仍会保留。
 - dry-run 全流程能生成报告、语雀同步计划和企业微信消息内容。
+
+## 废弃主机清理扩展边界
+
+废弃主机清理不改变探测命令本身。探测命令仍必须保持只读，清理扩展只读取正式巡检产出的 raw JSON 证据。
+
+用于自动清理证据的 raw JSON 必须带有：
+
+```json
+{
+  "run_id": "20260528-090000-abcd1234",
+  "profile": "local",
+  "run_source": "weekly_scheduled",
+  "cleanup_evidence_eligible": true
+}
+```
+
+缺少这些字段的历史 raw、手工探测、dry-run、临时探测，只能作为页面参考，不得驱动自动清理。

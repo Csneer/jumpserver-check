@@ -284,3 +284,44 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 ```powershell
 python -m pytest
 ```
+
+## 废弃主机确认与清理（可选扩展）
+
+默认巡检仍然只读，不会修改 JumpServer 资产。废弃主机清理需要显式启用，并采用“最近两次 eligible 定时巡检不可达 + 页面确认 + 确认后的下次正式巡检复核 + apply 前重新门控 + 存档后清理”的门控。
+
+生成清理候选计划：
+
+```bash
+python scripts/host_cleanup.py evaluate --profile local
+```
+
+启动本地确认页面：
+
+```bash
+CLEANUP_ADMIN_TOKEN=replace-with-local-token \
+python scripts/cleanup_admin_server.py --profile local --host 127.0.0.1 --port 8088
+```
+
+定时巡检如需产出可用于清理的正式证据，应显式标记来源：
+
+```bash
+python scripts/run_weekly_check.py \
+  --profile local \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate
+```
+
+对已确认且通过门控的资产执行清理建议先 dry-run：
+
+```bash
+python scripts/run_weekly_check.py \
+  --profile local \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate \
+  --cleanup-apply-confirmed \
+  --cleanup-dry-run
+```
+
+真实清理默认执行 `PATCH is_active=false`，让资产退出后续巡检但保留 JumpServer 记录。`apply` 会重新读取最新 raw 与确认/保护清单，旧 plan 不能绕过保护或确认变更；确认后未经历下一次正式巡检会跳过。`DELETE` 默认不启用；如需启用必须同时满足环境变量、CLI、确认记录、`delete_ack` 和计划动作等危险门控。

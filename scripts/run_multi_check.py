@@ -42,6 +42,18 @@ def build_profile_command(args: argparse.Namespace, profile: str) -> list[str]:
         command.append("--dry-run-yuque")
     if args.dry_run_notify:
         command.append("--dry-run-notify")
+    if getattr(args, "cleanup_evaluate", False):
+        command.append("--cleanup-evaluate")
+    if getattr(args, "cleanup_apply_confirmed", False):
+        command.append("--cleanup-apply-confirmed")
+    if getattr(args, "cleanup_dry_run", False):
+        command.append("--cleanup-dry-run")
+    if getattr(args, "cleanup_allow_delete", False):
+        command.append("--cleanup-allow-delete")
+    if getattr(args, "run_source", ""):
+        command.extend(["--run-source", args.run_source])
+    if getattr(args, "cleanup_evidence_eligible", False):
+        command.append("--cleanup-evidence-eligible")
     if args.no_resume:
         command.append("--no-resume")
     if args.wait_timeout is not None:
@@ -104,6 +116,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-wecom", action="store_true")
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
+    parser.add_argument("--cleanup-evaluate", action="store_true")
+    parser.add_argument("--cleanup-apply-confirmed", action="store_true")
+    parser.add_argument("--cleanup-dry-run", action="store_true")
+    parser.add_argument("--cleanup-allow-delete", action="store_true")
+    parser.add_argument("--run-source", choices=("weekly_scheduled", "manual", "dry_run", "tmp_probe"), default="")
+    parser.add_argument("--cleanup-evidence-eligible", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--wait-timeout", type=int)
     parser.add_argument("--poll-interval", type=int)
