@@ -289,3 +289,94 @@ def test_delete_requires_all_gates(tmp_path, monkeypatch):
     )
 
     assert result_payload["results"][0]["status"] == "skipped_delete_not_allowed"
+
+
+def test_current_asset_matches_rejects_inactive():
+    candidate = {"asset_id": "a1", "asset_ip": "10.0.0.1", "asset_name": "host-a"}
+    assert host_cleanup.current_asset_matches(candidate, {"id": "a1", "address": "10.0.0.1", "name": "host-a", "is_active": False}) is False
+
+
+def test_current_asset_matches_rejects_name_mismatch():
+    candidate = {"asset_id": "a1", "asset_ip": "10.0.0.1", "asset_name": "host-a"}
+    assert host_cleanup.current_asset_matches(candidate, {"id": "a1", "address": "10.0.0.1", "name": "host-b", "is_active": True}) is False
+
+
+def test_current_asset_matches_rejects_ip_mismatch():
+    candidate = {"asset_id": "a1", "asset_ip": "10.0.0.1", "asset_name": "host-a"}
+    assert host_cleanup.current_asset_matches(candidate, {"id": "a1", "address": "10.0.0.2", "name": "host-a", "is_active": True}) is False
+
+
+def test_stale_confirmation_candidate_when_ip_changed(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    state = tmp_path / "state"
+    write_raw(raw / "r1.json", "run-1", [result()], started_at="2026-05-20T09:00:00+08:00")
+    write_raw(raw / "r2.json", "run-2", [result()], started_at="2026-05-27T09:00:00+08:00")
+    host_cleanup.write_confirmation(
+        state,
+        profile="local",
+        asset={"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "10.0.0.99"},
+        operator="admin",
+        reason="decommissioned",
+        action="disable",
+        source_evidence_run_ids=["run-0"],
+        source_evidence_paths=["old.json"],
+    )
+
+    plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=state, output_dir=tmp_path / "cleanup")
+
+    stale = [c for c in plan["candidates"] if c.get("confirmation_state") == "stale_confirmation"]
+    assert len(stale) == 1
+    assert stale[0]["asset_id"] == "asset-1"
+    assert stale[0]["confirmation_reason"] == "asset_ip_changed_since_confirmation"
+
+
+def test_merge_fresh_candidate_flags_action_mismatch():
+    plan_candidate = {"asset_id": "a1", "planned_action": "delete"}
+    fresh_candidate = {"asset_id": "a1", "planned_action": "disable"}
+
+    merged = host_cleanup.merge_fresh_candidate(plan_candidate, fresh_candidate)
+
+    assert merged["planned_action_mismatch"]["plan"] == "delete"
+    assert merged["planned_action_mismatch"]["fresh"] == "disable"
+
+
+def test_parse_timestamp_edge_cases():
+    assert host_cleanup.parse_timestamp(None) is None
+    assert host_cleanup.parse_timestamp("") is None
+    parsed_z = host_cleanup.parse_timestamp("2026-05-28T09:00:00Z")
+    assert parsed_z is not None and parsed_z.tzinfo is not None
+    parsed_naive = host_cleanup.parse_timestamp("2026-05-28T09:00:00")
+    assert parsed_naive is not None and parsed_naive.tzinfo is not None
+    assert host_cleanup.parse_timestamp("not-a-date") is None
+
+
+def test_load_eligible_raw_records_skips_bad_json(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "good.json").write_text(json.dumps({
+        "run_id": "run-1", "profile": "local", "run_source": "weekly_scheduled",
+        "cleanup_evidence_eligible": True, "started_at": "2026-05-20T09:00:00+08:00",
+        "results": [],
+    }), encoding="utf-8")
+    (raw / "bad.json").write_text("{invalid json", encoding="utf-8")
+    (raw / "empty.json").write_text("", encoding="utf-8")
+
+    records = host_cleanup.load_eligible_raw_records(raw, "local")
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "run-1"
+
+
+def test_scrub_sensitive_removes_secret_keys():
+    data = {
+        "name": "host-a",
+        "secret": "should-be-removed",
+        "access_key": "also-removed",
+        "nested": {"password": "gone", "safe": "kept"},
+        "items": [{"token": "gone"}, {"ok": True}],
+    }
+
+    scrubbed = host_cleanup.scrub_sensitive(data)
+
+    assert scrubbed == {"name": "host-a", "nested": {"safe": "kept"}, "items": [{}, {"ok": True}]}

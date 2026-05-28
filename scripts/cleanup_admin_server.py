@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -54,12 +55,13 @@ def profile_from_query(path: str, context: "AdminContext") -> str:
     return profile_env.normalize_profile(values[0] if values else context.profile)
 
 
-def make_session_cookie(token: str, ttl_seconds: int) -> str:
+def make_session_cookie(token: str, ttl_seconds: int) -> tuple[str, str]:
+    csrf = secrets.token_hex(32)
     expires_at = int(time.time()) + ttl_seconds
-    payload = json.dumps({"exp": expires_at}, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps({"exp": expires_at, "csrf": csrf}, separators=(",", ":")).encode("utf-8")
     payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
     sig = hmac.new(token.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
-    return f"{payload_b64}.{sig}"
+    return f"{payload_b64}.{sig}", csrf
 
 
 def parse_cookie_header(headers: dict[str, str]) -> dict[str, str]:
@@ -91,6 +93,19 @@ def valid_session(headers: dict[str, str], context: "AdminContext") -> bool:
     return int(payload.get("exp") or 0) >= int(time.time())
 
 
+def csrf_from_session(headers: dict[str, str]) -> str:
+    value = parse_cookie_header(headers).get(SESSION_COOKIE, "")
+    if "." not in value:
+        return ""
+    payload_b64 = value.rsplit(".", 1)[0]
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("csrf") or "")
+
+
 def is_authenticated(headers: dict[str, str], context: "AdminContext") -> bool:
     if context.token and hmac.compare_digest(token_from_headers(headers), context.token):
         return True
@@ -102,6 +117,18 @@ def require_authenticated(headers: dict[str, str], context: "AdminContext") -> R
         return json_response(403, {"error": "admin_token_not_configured"})
     if not is_authenticated(headers, context):
         return json_response(401, {"error": "login_required"})
+    return None
+
+
+def require_csrf(headers: dict[str, str]) -> Response | None:
+    expected = csrf_from_session(headers)
+    if not expected:
+        return json_response(403, {"error": "csrf_token_missing"})
+    supplied = headers.get("x-csrf-token") or headers.get("X-CSRF-Token") or ""
+    if not supplied:
+        return json_response(403, {"error": "csrf_token_missing"})
+    if not hmac.compare_digest(supplied, expected):
+        return json_response(403, {"error": "csrf_token_invalid"})
     return None
 
 
@@ -222,8 +249,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
                 return json_response(403, {"error": "admin_token_not_configured"})
             if not hmac.compare_digest(supplied, context.token):
                 return json_response(401, {"error": "invalid_token"})
-            cookie = make_session_cookie(context.token, context.session_ttl_seconds)
-            response = json_response(200, {"status": "ok", "profile": context.profile, "profiles": profile_metadata(context)})
+            cookie, csrf = make_session_cookie(context.token, context.session_ttl_seconds)
+            response = json_response(200, {"status": "ok", "profile": context.profile, "profiles": profile_metadata(context), "csrf_token": csrf})
             response.headers["Set-Cookie"] = f"{SESSION_COOKIE}={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age={context.session_ttl_seconds}"
             return response
         if method == "POST" and route == "/api/logout":
@@ -234,7 +261,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
             auth_error = require_authenticated(headers, context)
             if auth_error:
                 return auth_error
-            return json_response(200, {"status": "ok", "profile": context.profile, "profiles": profile_metadata(context)})
+            csrf = csrf_from_session(headers)
+            return json_response(200, {"status": "ok", "profile": context.profile, "profiles": profile_metadata(context), "csrf_token": csrf})
         if method == "GET" and route == "/api/profiles":
             auth_error = require_authenticated(headers, context)
             if auth_error:
@@ -258,6 +286,9 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
             auth_error = require_write_token(headers, context)
             if auth_error:
                 return auth_error
+            csrf_error = require_csrf(headers)
+            if csrf_error:
+                return csrf_error
             payload = parse_json_body(body)
             profile_context = context.for_profile(str(payload.get("profile") or context.profile))
             if route == "/api/confirm":
@@ -375,7 +406,7 @@ let currentProfile='';
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function toast(msg,error=false){const t=document.createElement('div');t.className='toast'+(error?' error':'');t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),4200);}
 function selectedProfile(){return document.getElementById('profileSelect').value||currentProfile;}
-function authHeaders(){return {'Content-Type':'application/json'};}
+function authHeaders(){return {'Content-Type':'application/json','X-CSRF-Token':sessionStorage.getItem('csrf_token')||''};}
 function basePayload(c){return {profile:selectedProfile(),asset:{asset_id:c.asset_id,asset_name:c.asset_name,asset_ip:c.asset_ip},asset_id:c.asset_id,operator:document.getElementById('operator').value.trim(),reason:document.getElementById('reason').value.trim(),source_evidence_run_ids:c.evidence_run_ids||[],source_evidence_paths:c.evidence_paths||[]};}
 function validateForm(){if(!document.getElementById('operator').value.trim()) throw new Error('请填写操作人');if(!document.getElementById('reason').value.trim()) throw new Error('请填写处理原因');}
 function postDecision(route,payload,okMsg){try{validateForm();}catch(e){toast(e.message,true);return;}fetch(route,{method:'POST',headers:authHeaders(),body:JSON.stringify(payload),credentials:'same-origin'}).then(r=>r.json().then(data=>({ok:r.ok,status:r.status,data}))).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));toast(okMsg);load();}).catch(err=>toast(String(err),true));}
@@ -393,9 +424,9 @@ function render(){renderStats();const items=filtered();document.getElementById('
 function unlock(){document.getElementById('loginScreen').classList.add('hidden');document.getElementById('appShell').classList.remove('app-locked');}
 function lock(msg=''){document.getElementById('loginScreen').classList.remove('hidden');document.getElementById('appShell').classList.add('app-locked');if(msg)document.getElementById('loginMsg').textContent=msg;}
 function load(){document.getElementById('updatedAt').textContent='刷新中...';const p=encodeURIComponent(selectedProfile());fetch('/api/candidates?profile='+p,{credentials:'same-origin'}).then(r=>{if(r.status===401){lock('请先登录');throw new Error('login required');}return r.json().then(data=>({ok:r.ok,status:r.status,data}));}).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));latestData=res.data;currentProfile=latestData.profile||selectedProfile();if(latestData.profiles)renderProfiles(latestData.profiles);document.getElementById('updatedAt').textContent='最近刷新 '+new Date().toLocaleString();render();}).catch(err=>{if(String(err)!=='Error: login required'){document.getElementById('updatedAt').textContent='加载失败';toast(String(err),true);}});}
-function checkSession(){fetch('/api/session',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(data=>{if(!data){lock();return;}currentProfile=data.profile;renderProfiles(data.profiles||[]);unlock();load();}).catch(()=>lock());}
-function login(){const token=document.getElementById('loginToken').value.trim();document.getElementById('loginMsg').textContent='登录中...';fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token}),credentials:'same-origin'}).then(r=>r.json().then(data=>({ok:r.ok,status:r.status,data}))).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));currentProfile=res.data.profile;renderProfiles(res.data.profiles||[]);document.getElementById('loginToken').value='';document.getElementById('loginMsg').textContent='';unlock();load();}).catch(err=>{document.getElementById('loginMsg').textContent='登录失败';toast(String(err),true);});}
-function logout(){fetch('/api/logout',{method:'POST',credentials:'same-origin'}).finally(()=>lock('已退出'));}
+function checkSession(){fetch('/api/session',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(data=>{if(!data){lock();return;}currentProfile=data.profile;renderProfiles(data.profiles||[]);if(data.csrf_token)sessionStorage.setItem('csrf_token',data.csrf_token);unlock();load();}).catch(()=>lock());}
+function login(){const token=document.getElementById('loginToken').value.trim();document.getElementById('loginMsg').textContent='登录中...';fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token}),credentials:'same-origin'}).then(r=>r.json().then(data=>({ok:r.ok,status:r.status,data}))).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));currentProfile=res.data.profile;renderProfiles(res.data.profiles||[]);if(res.data.csrf_token)sessionStorage.setItem('csrf_token',res.data.csrf_token);document.getElementById('loginToken').value='';document.getElementById('loginMsg').textContent='';unlock();load();}).catch(err=>{document.getElementById('loginMsg').textContent='登录失败';toast(String(err),true);});}
+function logout(){sessionStorage.removeItem('csrf_token');fetch('/api/logout',{method:'POST',credentials:'same-origin'}).finally(()=>lock('已退出'));}
 document.getElementById('loginBtn').onclick=login;document.getElementById('loginToken').onkeydown=e=>{if(e.key==='Enter')login();};document.getElementById('logoutBtn').onclick=logout;document.getElementById('refreshBtn').onclick=load;document.getElementById('rawBtn').onclick=()=>document.getElementById('drawer').classList.remove('hidden');document.getElementById('closeDrawer').onclick=()=>document.getElementById('drawer').classList.add('hidden');document.getElementById('search').oninput=render;document.getElementById('stateFilter').onchange=render;document.getElementById('profileSelect').onchange=()=>{currentProfile=selectedProfile();load();};checkSession();
 </script>
 </body></html>
