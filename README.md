@@ -214,16 +214,16 @@ python scripts\wecom_notify.py `
 
 `WECOM_CHANNEL` 默认是 `wecom`，发送企业微信原生 Markdown payload。如果 Webhook 指向自建转发器，可按转发器协议改为 `wecom_text` 或 `wecom_relay`；`wecom_relay` 使用 Alertmanager 风格 payload。
 
-Linux crontab 示例：
+Linux crontab 示例（只读巡检，不含清理）：
 
 ```cron
-0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python scripts/run_weekly_check.py --no-proxy >> logs/weekly-check.log 2>&1
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python3 scripts/run_weekly_check.py --no-proxy --require-wecom >> logs/weekly-check.log 2>&1
 ```
 
-多环境 crontab 示例：
+多环境 crontab 示例（含废弃主机清理全流程）：
 
 ```cron
-0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check-all.lock python3 scripts/run_multi_check.py --profiles prod,test --parallel 2 --no-proxy --require-wecom >> logs/weekly-check.log 2>&1
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check-all.lock python3 scripts/run_multi_check.py --profiles prod,test --parallel 2 --no-proxy --require-wecom --run-source weekly_scheduled --cleanup-evidence-eligible --cleanup-evaluate --cleanup-apply-confirmed --cleanup-allow-delete >> logs/weekly-check.log 2>&1
 ```
 
 ## 输出
@@ -287,13 +287,55 @@ python -m pytest
 
 ## 废弃主机确认与清理（可选扩展）
 
-默认巡检仍然只读，不会修改 JumpServer 资产。废弃主机清理需要显式启用，并采用“最近两次 eligible 定时巡检不可达 + 页面确认 + 确认后的下次正式巡检复核 + apply 前重新门控 + 存档后清理”的门控。
+默认巡检仍然只读，不会修改 JumpServer 资产。废弃主机清理需要显式启用，并采用”最近两次 eligible 定时巡检不可达 + 页面确认 + 确认后的下次正式巡检复核 + apply 前重新门控 + 存档后清理”的五重门控。
 
-生成清理候选计划：
+### 完整流程
 
-```bash
-python scripts/host_cleanup.py evaluate --profile local
+一个完整的清理周期跨越三次定时巡检：
+
 ```
+第 1 周                          第 2 周                          第 3 周
+┌──────────────────┐            ┌──────────────────┐            ┌──────────────────┐
+│ 定时巡检 (带 eligible)        │ 定时巡检 (带 eligible)        │ 定时巡检 (带 eligible)        │
+│ → 产出 eligible 证据          │ → 产出新 eligible 证据        │ → 产出新 eligible 证据        │
+│ → cleanup-evaluate            │ → cleanup-evaluate            │ → cleanup-evaluate            │
+│   生成候选计划                 │   候选状态更新                 │   门控通过                     │
+└──────────────────┘            │                                │ → cleanup-apply-confirmed     │
+         │                      │ 管理员在 Admin UI 确认         │   执行 disable/delete         │
+         ▼                      │ （确认引用第 1 周证据）        └──────────────────┘
+  Admin UI 展示候选              │                                │
+  管理员可查看但                 └──────────────────┘                  │
+  尚未确认                              │                             ▼
+                                最新证据 ≠ 确认引用的证据        JumpServer 资产被禁用/删除
+                                门控判定：需等待下一轮             企业微信通知已发送
+```
+
+关键规则：管理员确认时引用的证据 run 必须早于最新一次 eligible 巡检，门控才判定为”已确认”。如果确认引用的证据就是最新 run，系统会标记 `confirmed_wait_next_scheduled_run`，等待下一次巡检产生新证据。
+
+### 环境变量
+
+清理相关环境变量（在 `.env` 或 profile env 中配置）：
+
+```env
+# Admin UI 服务
+CLEANUP_ADMIN_TOKEN=replace-with-a-strong-token
+CLEANUP_ADMIN_PROFILE=local
+# 可选：额外允许展示的 JumpServer 配置，逗号分隔；configs/profiles/*.env 也会自动发现。
+CLEANUP_ADMIN_PROFILES=prod-a,prod-b
+CLEANUP_ADMIN_HOST=127.0.0.1
+CLEANUP_ADMIN_PORT=8088
+
+# 企业微信通知（Admin UI 操作后推送）
+WECOM_NOTIFY_ADMIN_ACTIONS=1
+ACCESS_URL=http://192.168.1.10:8088
+
+# 允许通过门控的 delete 动作（不配置则只允许 disable）
+CLEANUP_ALLOW_DELETE=false
+```
+
+`ACCESS_URL` 是 admin 管理页面的访问地址，用于企业微信通知中的可点击链接，方便团队成员直接从通知进入管理页面。
+
+### Admin UI 操作页面
 
 启动本地确认页面（临时前台运行）：
 
@@ -304,41 +346,48 @@ python scripts/cleanup_admin_server.py --profile local --host 127.0.0.1 --port 8
 
 页面默认会要求先登录，登录口令就是服务端配置的 `CLEANUP_ADMIN_TOKEN`。登录前不会加载候选主机、原始 JSON 或多 JumpServer profile 列表；登录后可以在页面右侧选择 JumpServer 配置分别查看各自的废弃候选。profile 来源包括启动参数 `--profile`、`CLEANUP_ADMIN_PROFILES` / `--profiles` 显式白名单，以及 `configs/profiles/*.env` 中发现的配置文件。
 
-长期运行建议使用 systemd 服务。先在 `.env` 中配置：
+Admin UI 提供三个操作按钮：
 
-```env
-CLEANUP_ADMIN_TOKEN=replace-with-a-strong-token
-CLEANUP_ADMIN_PROFILE=local
-# 可选：额外允许展示的 JumpServer 配置，逗号分隔；configs/profiles/*.env 也会自动发现。
-CLEANUP_ADMIN_PROFILES=prod-a,prod-b
-CLEANUP_ADMIN_HOST=127.0.0.1
-CLEANUP_ADMIN_PORT=8088
-```
+| 按钮 | 作用 | 写入文件 |
+|---|---|---|
+| **确认废弃** | 弹出二级选择「禁用（推荐）」或「删除（危险）」 | `cleanup_confirmed_hosts.json` |
+| **保护** | 标记为不应清理的主机 | `cleanup_protected_hosts.json` |
+| **需复查** | 标记为需要进一步确认 | `cleanup_review_hosts.json` |
 
-然后在部署机执行：
+确认废弃时选择”删除”需要额外的 `delete_ack` 确认。所有写操作完成后会触发企业微信通知（需配置 `WECOM_NOTIFY_ADMIN_ACTIONS=1`）。
+
+长期运行建议使用 systemd 服务：
 
 ```bash
 sudo bash scripts/install_cleanup_admin_service.sh
 sudo systemctl status jumpserver-cleanup-admin.service
 ```
 
-默认监听 `127.0.0.1:8088`，推荐通过 SSH 端口转发访问；如果要直接访问 `http://<server>:8088/`，可将 `CLEANUP_ADMIN_HOST=0.0.0.0`，但必须配置强 token。写入确认、保护、复查清单时会沿用当前页面选择的 profile，并写入该 profile 对应的本地状态目录。如果启动时显式传入 `--raw-dir` / `--state-dir` / `--output-dir`，非默认 profile 会自动使用这些基目录下的同名子目录，避免多套 JumpServer 混用同一份证据或状态文件。
+默认监听 `127.0.0.1:8088`，推荐通过 SSH 端口转发访问；如果要直接访问 `http://<server>:8088/`，可将 `CLEANUP_ADMIN_HOST=0.0.0.0`，但必须配置强 token。
 
-定时巡检如需产出可用于清理的正式证据，应显式标记来源：
+### CLI 参数说明
+
+清理相关参数**必须与 `--run-source weekly_scheduled` 一起使用**：
+
+| 参数 | 作用 |
+|---|---|
+| `--cleanup-evidence-eligible` | **必须**。将本次探测结果标记为 cleanup 有效证据。不带此参数的巡检结果不会进入证据链，cleanup evaluate 会忽略该次 run |
+| `--cleanup-evaluate` | 巡检后生成废弃主机清理候选计划 |
+| `--cleanup-apply-confirmed` | 对已确认且通过门控的资产执行清理 |
+| `--cleanup-dry-run` | 清理 apply 只演练，不调用 JumpServer mutation API |
+| `--cleanup-allow-delete` | 允许通过五重门控的 delete 动作 |
+| `--run-source weekly_scheduled` | 标记为定时巡检来源，cleanup evaluate 只认此来源的 raw 数据 |
+
+> **重要**：`--cleanup-evidence-eligible` 是整个清理流程的基础。不带此参数的巡检不会产出有效证据，导致 cleanup evaluate 看不到候选主机，已有确认也会因”确认引用最新 run”被门控跳过。
+
+### 常用命令
+
+单环境巡检 + 清理（先 dry-run 验证）：
 
 ```bash
-python scripts/run_weekly_check.py \
+python3 scripts/run_weekly_check.py \
   --profile local \
-  --run-source weekly_scheduled \
-  --cleanup-evidence-eligible \
-  --cleanup-evaluate
-```
-
-对已确认且通过门控的资产执行清理建议先 dry-run：
-
-```bash
-python scripts/run_weekly_check.py \
-  --profile local \
+  --no-proxy \
   --run-source weekly_scheduled \
   --cleanup-evidence-eligible \
   --cleanup-evaluate \
@@ -346,4 +395,71 @@ python scripts/run_weekly_check.py \
   --cleanup-dry-run
 ```
 
-真实清理默认执行 `PATCH is_active=false`，让资产退出后续巡检但保留 JumpServer 记录。`apply` 会重新读取最新 raw 与确认/保护清单，旧 plan 不能绕过保护或确认变更；确认后未经历下一次正式巡检会跳过。`DELETE` 默认不启用；如需启用必须同时满足环境变量、CLI、确认记录、`delete_ack` 和计划动作等危险门控。
+正式执行（去掉 `--cleanup-dry-run`）：
+
+```bash
+python3 scripts/run_weekly_check.py \
+  --profile local \
+  --no-proxy \
+  --require-wecom \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate \
+  --cleanup-apply-confirmed \
+  --cleanup-allow-delete
+```
+
+多环境并发巡检 + 清理：
+
+```bash
+python3 scripts/run_multi_check.py \
+  --profiles local,uat \
+  --parallel 2 \
+  --no-proxy \
+  --require-wecom \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate \
+  --cleanup-apply-confirmed \
+  --cleanup-allow-delete
+```
+
+只生成清理候选计划（不执行清理）：
+
+```bash
+python3 scripts/run_weekly_check.py \
+  --profile local \
+  --no-proxy \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate
+```
+
+### 清理动作说明
+
+真实清理默认执行 `PATCH is_active=false`，让资产退出后续巡检但保留 JumpServer 记录。`apply` 会重新读取最新 raw 与确认/保护清单，旧 plan 不能绕过保护或确认变更；确认后未经历下一次正式巡检会跳过。
+
+`DELETE` 默认不启用；如需启用必须同时满足：
+- 环境变量 `CLEANUP_ALLOW_DELETE=true`
+- CLI 参数 `--cleanup-allow-delete`
+- 确认记录中 `cleanup_action` 为 `delete`
+- 确认记录中包含 `delete_ack` 字段
+- 计划动作与确认动作一致
+
+### 目录结构
+
+清理相关的文件按 profile 隔离：
+
+```text
+artifacts/
+  raw/<profile>/                                    # 探测原始结果
+    jumpserver-host-ip-check-YYYYMMDD-HHMMSS.json   # cleanup_evidence_eligible=True 才会被 cleanup 使用
+  state/<profile>/
+    cleanup_confirmed_hosts.json                     # 已确认废弃的主机
+    cleanup_protected_hosts.json                     # 被保护的主机（不清理）
+    cleanup_review_hosts.json                        # 需复查的主机
+    jms-host-ip-check-inflight.json                  # Ops 任务接续状态
+  cleanup/<profile>/
+    cleanup-plan-YYYYMMDD-HHMMSS.json                # 清理候选计划
+    cleanup-result-YYYYMMDD-HHMMSS.json              # 清理执行结果
+```
