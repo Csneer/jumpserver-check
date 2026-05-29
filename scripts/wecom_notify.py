@@ -75,6 +75,28 @@ def load_summary(summary_json: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def cleanup_plan_summary_text(plan_summary: dict[str, Any]) -> str:
+    parts = [
+        f"候选 {plan_summary.get('candidates', 0)}",
+        f"需人工复核 {plan_summary.get('review_required', 0)}",
+        f"跳过 {plan_summary.get('skipped', 0)}",
+    ]
+    return " / ".join(parts)
+
+
+def review_required_preview(plan: dict[str, Any], limit: int = 5) -> str:
+    items = plan.get("review_required") if isinstance(plan.get("review_required"), list) else []
+    previews: list[str] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("asset_name") or item.get("asset_id") or "-")
+        ip = str(item.get("asset_ip") or "")
+        previews.append(f"{label}({ip})" if ip else label)
+    if len(items) > limit:
+        previews.append(f"等{len(items)}台")
+    return "，".join(previews)
+
 def status_label(status: str) -> str:
     labels = {"success": "成功", "failed": "失败", "timeout": "超时"}
     return labels.get(status, status)
@@ -142,10 +164,13 @@ def build_markdown_message(
             [
                 "",
                 "- 清理候选："
-                f"候选 {plan_summary.get('candidates', 0)} / 跳过 {plan_summary.get('skipped', 0)}"
+                + cleanup_plan_summary_text(plan_summary)
                 + (f" / 执行结果 {len(apply_results)}" if apply else ""),
             ]
         )
+        preview = review_required_preview(plan)
+        if preview:
+            lines.append(f"- IP可达需复核：{preview}")
         if plan.get("plan_path"):
             lines.append(f"- 清理计划：`{plan.get('plan_path')}`")
         if apply.get("result_path"):
@@ -217,6 +242,12 @@ def build_relay_message(
         issue_counts = [(key, value) for key, value in ordered_status_counts(status_counts) if key != "ok_static"]
         issue_text = "，".join(f"{status_count_label(key)}: {value}" for key, value in issue_counts) or "无"
         lines.extend([f"**概览**：正常 {ok_count} / 需关注 {attention_count}", f"**问题分类**：{issue_text}"])
+    cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
+    if cleanup:
+        plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
+        plan_summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
+        if plan_summary:
+            lines.append(f"**清理候选**：{cleanup_plan_summary_text(plan_summary)}")
     if yuque_url:
         lines.append(f"[查看语雀报告]({yuque_url})")
     return "\n\n".join(lines)
@@ -231,6 +262,13 @@ def build_alert_summary(status: str, summary: dict[str, Any] | None = None) -> s
         parts.append(f"资产 {run_summary.get('total_assets')}")
     if status_counts.get("unreachable"):
         parts.append(f"不可达 {status_counts.get('unreachable')}")
+    if status_counts.get("jumpserver_unreachable_ip_reachable"):
+        parts.append(f"IP可达需复核 {status_counts.get('jumpserver_unreachable_ip_reachable')}")
+    cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
+    plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
+    plan_summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
+    if plan_summary.get("review_required") and not status_counts.get("jumpserver_unreachable_ip_reachable"):
+        parts.append(f"需人工复核 {plan_summary.get('review_required')}")
     if status_counts.get("duplicate_asset"):
         parts.append(f"重复 {status_counts.get('duplicate_asset')}")
     return " / ".join(parts)

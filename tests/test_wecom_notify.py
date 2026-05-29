@@ -194,7 +194,7 @@ def test_build_markdown_message_includes_cleanup_summary():
     )
 
     assert "清理候选" in message
-    assert "候选 2 / 跳过 1 / 执行结果 1" in message
+    assert "候选 2 / 需人工复核 0 / 跳过 1 / 执行结果 1" in message
     assert "artifacts/cleanup/local/plan.json" in message
 
 
@@ -284,3 +284,41 @@ def test_new_ping_review_status_has_label():
     }
     message = notify.build_markdown_message("success", "JumpServer 每周主机巡检", summary)
     assert "JumpServer不可达但IP可达: 2" in message
+
+
+def test_markdown_message_highlights_review_required_cleanup_and_ip_reachable():
+    summary = {
+        "summary": {"total_assets": 10, "linux_assets": 10, "unauthorized_assets": 0},
+        "status_counts": {"ok_static": 8, "jumpserver_unreachable_ip_reachable": 2, "unreachable": 1},
+        "cleanup": {
+            "plan": {
+                "summary": {"candidates": 1, "review_required": 2, "skipped": 3},
+                "review_required": [
+                    {"asset_name": "host-a", "asset_ip": "192.0.2.10", "ip_reachability_remark": "ping reachable from deployment host"},
+                    {"asset_name": "host-b", "asset_ip": "192.0.2.11", "ip_reachability_remark": "ping reachable from deployment host"},
+                ],
+                "plan_path": "artifacts/cleanup/local/plan.json",
+            }
+        },
+    }
+
+    message = notify.build_markdown_message("success", "JumpServer 每周主机巡检", summary)
+
+    assert "JumpServer不可达但IP可达: 2" in message
+    assert "候选 1 / 需人工复核 2 / 跳过 3" in message
+    assert "IP可达需复核：host-a(192.0.2.10)，host-b(192.0.2.11)" in message
+
+
+def test_relay_message_highlights_review_required_cleanup_and_alert_summary():
+    summary = {
+        "summary": {"total_assets": 10, "linux_assets": 10, "unauthorized_assets": 0},
+        "status_counts": {"ok_static": 8, "jumpserver_unreachable_ip_reachable": 2, "unreachable": 1},
+        "cleanup": {"plan": {"summary": {"candidates": 1, "review_required": 2, "skipped": 3}}},
+    }
+
+    message = notify.build_relay_message("success", summary)
+    alert_summary = notify.build_alert_summary("success", summary)
+
+    assert "**清理候选**：候选 1 / 需人工复核 2 / 跳过 3" in message
+    assert "JumpServer不可达但IP可达: 2" in message
+    assert "IP可达需复核 2" in alert_summary
