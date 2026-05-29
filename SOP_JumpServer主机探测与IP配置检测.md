@@ -271,6 +271,164 @@ GET /api/v1/perms/users/self/assets/
 
 当前版本远端只读探测命令签名：`DETECTION_COMMAND_SHA256=582ac4569b2e12c4d807fb74ef8afe0129569b634f4926fcff01b87ba23e44b4`。该命令块来源于 `scripts/jms_host_ip_check.py::DETECTION_COMMAND`，修改命令时必须同步更新本 SOP 与一致性测试。
 
+当前版本实际 `DETECTION_COMMAND` 全文如下（只读采集，不包含删除/修改操作）：
+
+```bash
+set +e
+export LC_ALL=C
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+
+ip_type="unknown"
+actual_ip=""
+all_ips=""
+if_name=""
+
+route_line="$(ip route get 1.1.1.1 2>/dev/null | head -1)"
+actual_ip="$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+if_name="$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+
+if command -v ip >/dev/null 2>&1; then
+  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '$2 !~ /^(cni|flannel[.]|cali|veth|kube-ipvs|br-|virbr|docker|tunl|ovs-system|gre|fe:)/ {split($4,a,"/"); print a[1]}' | awk '!seen[$0]++' | paste -sd, -)"
+fi
+
+if [ -z "$all_ips" ] && command -v hostname >/dev/null 2>&1; then
+  all_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^172\.17\./ && !seen[$0]++' | paste -sd, -)"
+fi
+
+if [ -n "$actual_ip" ] && ! printf '%s\n' "$actual_ip" | grep -q '^172\.17\.'; then
+  case ",$all_ips," in
+    *",$actual_ip,"*) ;;
+    *) all_ips="${all_ips:+$all_ips,}$actual_ip" ;;
+  esac
+fi
+
+if [ -z "$actual_ip" ] && [ -n "$all_ips" ]; then
+  actual_ip="$(printf '%s\n' "$all_ips" | cut -d, -f1)"
+fi
+
+if [ "$ip_type" = "unknown" ] && [ -d /etc/NetworkManager/system-connections ]; then
+  for f in /etc/NetworkManager/system-connections/*.nmconnection; do
+    [ -f "$f" ] || continue
+    conn_iface="$(sed -n 's/^interface-name=//p' "$f" 2>/dev/null | head -1)"
+    method="$(awk 'BEGIN{s=0} /^\[ipv4\]/{s=1;next} /^\[/{s=0} s && /^method=/{print; exit}' "$f" 2>/dev/null | cut -d= -f2- | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+    has_ip=0
+    if [ -n "$actual_ip" ] && grep -q "$actual_ip/" "$f" 2>/dev/null; then has_ip=1; fi
+    if { [ -n "$if_name" ] && [ "$conn_iface" = "$if_name" ]; } || [ "$has_ip" = 1 ]; then
+      case "$method" in
+        manual|static|none) ip_type="static"; break ;;
+        auto|dhcp) ip_type="dhcp"; break ;;
+      esac
+    fi
+  done
+fi
+
+if [ "$ip_type" = "unknown" ] && command -v nmcli >/dev/null 2>&1; then
+  nm_out="$(nmcli -t -f GENERAL.DEVICES,ipv4.method conn show --active 2>/dev/null)"
+  nm_method="$(printf '%s\n' "$nm_out" | awk -F: -v iface="$if_name" '/^GENERAL.DEVICES:/ {dev=$2} /^ipv4.method:/ {if (dev == iface) {print $2; exit}}' | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  if [ -z "$nm_method" ]; then
+    nm_method="$(printf '%s\n' "$nm_out" | awk -F: '/^ipv4.method:/ {print $2; exit}' | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  fi
+  if printf '%s\n' "$nm_method" | grep -qi 'manual\|static\|none'; then
+    ip_type="static"
+  elif printf '%s\n' "$nm_method" | grep -qi 'auto\|dhcp'; then
+    ip_type="dhcp"
+  fi
+fi
+
+if [ "$ip_type" = "unknown" ]; then
+  for f in /etc/sysconfig/network-scripts/ifcfg-*; do
+    [ -f "$f" ] || continue
+    cfg_iface="$(grep -i '^DEVICE=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    cfg_name="$(grep -i '^NAME=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    cfg_ip="$(grep -i '^IPADDR=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" ")"
+    if [ -n "$if_name" ] && [ "$cfg_iface" != "$if_name" ] && [ "$cfg_name" != "$if_name" ]; then
+      if [ -z "$actual_ip" ] || [ "$cfg_ip" != "$actual_ip" ]; then continue; fi
+    fi
+    bootproto="$(grep -i '^BOOTPROTO=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+    case "$bootproto" in
+      static|none) ip_type="static"; break ;;
+      dhcp) ip_type="dhcp"; break ;;
+    esac
+  done
+fi
+
+if [ "$ip_type" = "unknown" ] && [ -d /etc/netplan ]; then
+  netplan_type="$(awk -v iface="$if_name" -v ip="$actual_ip" '
+    /^[[:space:]]*#/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]+#.*/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+      if (iface != "" && line ~ "^[[:space:]]*" iface ":[[:space:]]*$") in_iface = 1
+      else if (line ~ /^[[:space:]]*[-A-Za-z0-9_.:]+:[[:space:]]*$/ && line !~ /^[[:space:]]*(network|version|renderer|ethernets|bonds|bridges|vlans|wifis):/) in_iface = 0
+      if (ip != "" && line ~ /addresses:[[:space:]]*/ && index(line, ip) > 0) ip_method = "static"
+      if (in_iface && line ~ /dhcp4:[[:space:]]*true/) iface_method = "dhcp"
+      if (in_iface && line ~ /dhcp4:[[:space:]]*false/) iface_method = "static"
+      if (in_iface && line ~ /addresses:[[:space:]]*/) iface_method = "static"
+      if (first_method == "" && line ~ /dhcp4:[[:space:]]*true/) first_method = "dhcp"
+      if (first_method == "" && line ~ /addresses:[[:space:]]*/) first_method = "static"
+    }
+    END {
+      if (iface_method != "") print iface_method
+      else if (ip_method != "") print ip_method
+      else print first_method
+    }
+  ' /etc/netplan/*.yaml /etc/netplan/*.yml 2>/dev/null | head -1 | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  if [ "$netplan_type" = "dhcp" ]; then
+    ip_type="dhcp"
+  elif [ "$netplan_type" = "static" ]; then
+    ip_type="static"
+  fi
+fi
+
+if [ "$ip_type" = "unknown" ] && [ -f /etc/network/interfaces ]; then
+  interfaces_type="$(awk -v iface="$if_name" -v ip="$actual_ip" '
+    function flush() {
+      if (method == "") return
+      if (iface != "" && cur_iface == iface) iface_method = method
+      if (ip != "" && has_ip == 1) ip_method = method
+      if (first_method == "") first_method = method
+    }
+    /^[[:space:]]*#/ { next }
+    {
+      sub(/[[:space:]]+#.*/, "")
+      if ($0 ~ /^[[:space:]]*$/) next
+    }
+    $1 == "iface" && $3 == "inet" {
+      flush()
+      cur_iface = $2
+      method = tolower($4)
+      has_ip = 0
+      next
+    }
+    $1 == "address" && $2 == ip { has_ip = 1 }
+    END {
+      flush()
+      if (iface_method != "") print iface_method
+      else if (ip_method != "") print ip_method
+      else print first_method
+    }
+  ' /etc/network/interfaces 2>/dev/null | head -1 | tr -d "\" " | tr '[:upper:]' '[:lower:]')"
+  case "$interfaces_type" in
+    static|manual|none) ip_type="static" ;;
+    dhcp) ip_type="dhcp" ;;
+  esac
+fi
+
+if [ "$ip_type" = "unknown" ] && command -v pgrep >/dev/null 2>&1; then
+  if pgrep -x dhclient >/dev/null 2>&1; then
+    ip_type="dhcp"
+  fi
+fi
+
+printf '%s\n' 'DETECT_START'
+printf 'IP_TYPE=%s\n' "$ip_type"
+printf 'IP_ADDR=%s\n' "$actual_ip"
+printf 'IP_ADDRS=%s\n' "$all_ips"
+printf 'IF_NAME=%s\n' "$if_name"
+printf '%s\n' 'DETECT_END'
+```
+
 ### 6.1 设计原则
 
 - 命令输出采用**固定前缀键值对**格式，便于解析，不依赖正则。
@@ -343,8 +501,10 @@ python3 scripts/run_weekly_check.py \
 `run_weekly_check.py` 最终会本地启动：
 
 ```bash
-python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible]
+python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible] --ip-reachability-check --ip-ping-count <n> --ip-ping-timeout <seconds> --ip-ping-workers <workers>
 ```
+
+周巡检默认开启部署机侧 IP 可达性证据：`--ip-reachability-check`。`--ip-ping-count` 默认 1，`--ip-ping-timeout` 默认 1 秒，`--ip-ping-workers` 默认 32 且 detect 侧上限 64，避免误配置造成过量并发。手工 detect 默认不启用 ping，可通过 `CHECK_IP_REACHABILITY=true` 或显式 CLI 参数启用。
 
 ## 7. 阶段四：下发 Ops 任务并轮询结果
 
@@ -567,13 +727,23 @@ artifacts/state/jms-host-ip-check-inflight.json
 | `ip_match` | IP 是否一致（true/false） |
 | `if_name` | 网卡名称 |
 | `ip_type` | static / dhcp / unknown |
-| `connectivity` | ok / unreachable |
-| `probe_status` | ok_static / warn_dhcp / unreachable / probe_timeout 等 |
+| `ops_connectivity` | JumpServer Ops 通道维度：ok / unreachable / skipped |
+| `connectivity` | 向后兼容字段，保持 JumpServer/Ops 通道语义：ok / unreachable / skipped |
+| `ip_reachability` | 部署机到资产 IP 的 ICMP 证据：reachable / unreachable / unknown / not_checked |
+| `ip_reachability_source` | 可达性证据来源，当前为 deployment_host_ping |
+| `ip_reachability_checked_at` | 部署机侧 ping 检查时间 |
+| `ip_reachability_command` | 实际执行的 argv 列表，例如 ["ping", "-c", "1", "-W", "1", "192.0.2.10"] |
+| `ip_reachability_exit_code` | ping 退出码；unknown/not_checked 时可为空 |
+| `ip_reachability_duration_ms` | ping 耗时毫秒；unknown/not_checked 时可为空 |
+| `ip_reachability_remark` | IP 可达性说明，例如 ping reachable / timeout / command missing |
+| `probe_status` | ok_static / warn_dhcp / unreachable / jumpserver_unreachable_ip_reachable / probe_timeout 等 |
 | `probe_source` | batch / skipped |
 | `original_probe_status` | 重复资产覆盖主状态时保留原始探测状态 |
 | `original_remark` | 重复资产覆盖主状态时保留原始备注 |
 | `node` | 所属节点/分组 |
 | `remark` | 备注（如：重复资产、任务失败、日志异常原因） |
+
+Raw JSON 顶层还会保留 `command_sha256`、`task_id`/`ops_task_ids`、`run_source`、`cleanup_evidence_eligible`、`ip_reachability_enabled` 与 `ip_reachability_config`。其中 `ops_task_ids` 汇总本轮 batch Ops task id，`ip_reachability_config` 记录 count、timeout、workers 的实际配置。
 
 Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主机列表；随后输出 `异常主机` 完整表和 `全量明细`。问题分类索引用于快速定位某类问题，完整排查仍以异常主机表和全量明细为准。
 
@@ -961,3 +1131,8 @@ duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  unreachable  >  prob
 ```
 
 页面只更新这些 profile-scoped 状态清单，不直接触发删除/禁用。定时任务在读取清单后，会重新结合最近两次 eligible scheduled raw 证据做最终清理判定；确认后未经历下一次正式巡检时必须跳过。
+
+
+### 后续增强：官方资产探测 API 与 TCP 端口证据
+
+JumpServer 管理页面可配置“启用资产探测 / 资产探测方式”。若要把这一路官方探测结果纳入本项目，应优先从当前 JumpServer 实例的 `/api/docs/` Swagger 确认对应 API、权限与返回 schema，再新增独立字段，例如 `jumpserver_probe_status`。部署机侧 `nc`/TCP 端口探测也可以作为补充证据，但应独立命名为 `tcp_reachability` 或 `service_reachability`，默认关闭或仅对 Ops unreachable 且 ping unknown/unreachable 的资产运行；它只能降低误清理风险或提示人工复核，不得绕过两次定时巡检、管理员确认、确认后下一次巡检和保护清单门控。

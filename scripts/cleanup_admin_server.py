@@ -132,6 +132,33 @@ def require_csrf(headers: dict[str, str]) -> Response | None:
     return None
 
 
+
+def current_cleanup_plan(context: AdminContext) -> dict[str, Any]:
+    return host_cleanup.evaluate_cleanup(
+        profile=context.profile,
+        raw_dir=context.raw_dir or default_raw_dir(context.profile),
+        state_dir=context.state_dir or host_cleanup.cleanup_profile_state_dir(context.profile),
+        output_dir=context.output_dir or host_cleanup.cleanup_output_dir(context.profile),
+        write_plan=False,
+    )
+
+
+def validate_current_confirmation(plan: dict[str, Any], payload: dict[str, Any]) -> Response | None:
+    asset = payload.get("asset") or payload
+    asset_id = str(asset.get("asset_id") or asset.get("id") or payload.get("asset_id") or "")
+    if any(str(item.get("asset_id") or "") == asset_id for item in plan.get("review_required") or []):
+        return json_response(409, {"error": "asset_requires_review"})
+    candidate = next((item for item in plan.get("candidates") or [] if str(item.get("asset_id") or "") == asset_id), None)
+    if not candidate:
+        return json_response(409, {"error": "asset_not_current_candidate"})
+    submitted_run_ids = [str(item) for item in payload.get("source_evidence_run_ids") or []]
+    current_run_ids = [str(item) for item in candidate.get("evidence_run_ids") or []]
+    submitted_paths = [str(item) for item in payload.get("source_evidence_paths") or []]
+    current_paths = [str(item) for item in candidate.get("evidence_paths") or []]
+    if submitted_run_ids != current_run_ids or submitted_paths != current_paths:
+        return json_response(409, {"error": "candidate_evidence_mismatch"})
+    return None
+
 def profile_metadata(context: "AdminContext") -> list[dict[str, str | bool]]:
     return [
         {
@@ -192,6 +219,10 @@ def json_response(status: int, payload: Any) -> Response:
 
 def html_response(content: str) -> Response:
     return Response(status=200, body=content.encode("utf-8"), headers={"Content-Type": "text/html; charset=utf-8"})
+
+
+def page_html() -> str:
+    return INDEX_HTML
 
 
 def parse_json_body(body: bytes) -> dict[str, Any]:
@@ -282,13 +313,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
             if auth_error:
                 return auth_error
             profile_context = context.for_profile(profile_from_query(path, context))
-            plan = host_cleanup.evaluate_cleanup(
-                profile=profile_context.profile,
-                raw_dir=profile_context.raw_dir or default_raw_dir(profile_context.profile),
-                state_dir=profile_context.state_dir or host_cleanup.cleanup_profile_state_dir(profile_context.profile),
-                output_dir=profile_context.output_dir or host_cleanup.cleanup_output_dir(profile_context.profile),
-                write_plan=False,
-            )
+            plan = current_cleanup_plan(profile_context)
             plan["profiles"] = profile_metadata(profile_context)
             return json_response(200, plan)
         if method == "POST" and route in {"/api/confirm", "/api/protect", "/api/review"}:
@@ -301,6 +326,10 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
             payload = parse_json_body(body)
             profile_context = context.for_profile(str(payload.get("profile") or context.profile))
             if route == "/api/confirm":
+                current_plan = current_cleanup_plan(profile_context)
+                validation_error = validate_current_confirmation(current_plan, payload)
+                if validation_error:
+                    return validation_error
                 record = host_cleanup.write_confirmation(
                     profile_context.state_dir or host_cleanup.cleanup_profile_state_dir(profile_context.profile),
                     profile=profile_context.profile,
@@ -406,7 +435,7 @@ INDEX_HTML = """<!doctype html>
 
   <section class="panel">
     <div class="panel-head"><h2>候选主机</h2><span class="muted" id="updatedAt">加载中...</span></div>
-    <div class="table-wrap"><table><thead><tr><th>资产</th><th>IP / 节点</th><th>操作</th><th>确认状态</th><th>失败原因</th><th>证据 run</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>资产</th><th>IP / 节点</th><th>操作</th><th>确认状态</th><th>失败原因</th><th>IP 可达性</th><th>Ping 时间</th><th>证据 run</th></tr></thead><tbody id="rows"></tbody></table></div>
     <div id="cards"></div>
     <div class="empty hidden" id="empty">没有匹配的候选主机</div>
   </section>
@@ -430,12 +459,13 @@ function review(c){postDecision('/api/review',basePayload(c),'已标记为需复
 const STATE_LABELS={missing_confirmation:'待确认',confirmed:'已确认',confirmed_wait_next_scheduled_run:'等待下次巡检',stale_confirmation:'确认已过期',invalid_confirmation:'确认无效',delete:'待删除',ip_reachable_requires_review:'IP可达需复核'};
 function stateLabel(s){return STATE_LABELS[s||'missing_confirmation']||s||'待确认';}
 function statusChip(state){const v=state||'missing_confirmation';return `<span class="chip ${esc(v)}">${esc(stateLabel(v))}</span>`;}
-function allRows(){const candidates=(latestData.candidates||[]).map(c=>({...c,__kind:'candidate'}));const reviews=(latestData.review_required||[]).map(c=>({...c,confirmation_state:c.reason||'ip_reachable_requires_review',latest_reason:c.ip_reachability_remark||c.latest_reason||'',__kind:'review'}));return candidates.concat(reviews);} function filtered(){const q=document.getElementById('search').value.trim().toLowerCase();const sf=document.getElementById('stateFilter').value;return allRows().filter(c=>{const text=[c.asset_name,c.asset_id,c.asset_ip,c.node,c.latest_reason,c.confirmation_state,c.confirmation_reason,c.ip_reachability].join(' ').toLowerCase();return (!q||text.includes(q))&&(!sf||c.confirmation_state===sf);});}
+function allRows(){const candidates=(latestData.candidates||[]).map(c=>({...c,__kind:'candidate'}));const reviews=(latestData.review_required||[]).map(c=>({...c,confirmation_state:c.reason||'ip_reachable_requires_review',latest_reason:c.ip_reachability_remark||c.latest_reason||'',__kind:'review'}));return candidates.concat(reviews);} function filtered(){const q=document.getElementById('search').value.trim().toLowerCase();const sf=document.getElementById('stateFilter').value;return allRows().filter(c=>{const text=[c.asset_name,c.asset_id,c.asset_ip,c.node,c.latest_reason,c.confirmation_state,c.confirmation_reason,c.ip_reachability,c.ip_reachability_checked_at,c.ip_reachability_remark].join(' ').toLowerCase();return (!q||text.includes(q))&&(!sf||c.confirmation_state===sf);});}
+function pingEvidence(c){return c.ip_reachability?`${esc(c.ip_reachability)}<br><span class="muted">${esc(c.ip_reachability_remark||'-')}</span>`:'-';}
 function renderProfiles(profiles){const sel=document.getElementById('profileSelect');const active=selectedProfile();sel.innerHTML=(profiles||[]).map(p=>`<option value="${esc(p.name)}" ${p.name===(active||currentProfile)?'selected':''}>${esc(p.label||p.name)}${p.has_config?'':'（仅运行参数）'}</option>`).join('');if(!sel.value&&profiles&&profiles[0])sel.value=profiles[0].name;currentProfile=sel.value||currentProfile;}
 function renderStats(){const rows=allRows();const counts=rows.reduce((m,x)=>(m[x.confirmation_state||'missing_confirmation']=(m[x.confirmation_state||'missing_confirmation']||0)+1,m),{});const s=latestData.summary||{};document.getElementById('stats').innerHTML=[['候选总数',s.candidates??(latestData.candidates||[]).length,'当前 profile：'+(latestData.profile||selectedProfile()||'-'),'warn'],['待确认',counts.missing_confirmation||0,'需要管理员判断','danger'],['已确认',counts.confirmed||0,'下次 apply 可继续门控','ok'],['等待复核',(s.review_required??(latestData.review_required||[]).length)+(counts.confirmed_wait_next_scheduled_run||0),'含 IP 可达需人工复核',''],['已跳过',s.skipped??0,'保护/证据不足等','']].map(([a,b,h,cls])=>`<div class="stat ${cls}"><div class="label">${a}</div><div class="value">${b}</div><div class="hint">${h}</div></div>`).join('');}
 function actionButtons(c,i){const confirmBtn=c.__kind==='review'?'':`<button class="btn primary small" data-action="confirm-abandon" data-index="${i}">确认废弃</button>`;return `<div class="actions">${confirmBtn}<button class="btn warn small" data-action="protect" data-index="${i}">保护</button><button class="btn ghost small" data-action="review" data-index="${i}">需复查</button></div>`;}
 function bindActions(items){document.querySelectorAll('button[data-action]').forEach(btn=>{btn.onclick=()=>{const c=items[Number(btn.dataset.index)];if(btn.dataset.action==='confirm-abandon')confirmAbandon(c);if(btn.dataset.action==='protect')protect(c);if(btn.dataset.action==='review')review(c);};});}
-function render(){renderStats();const items=filtered();document.getElementById('empty').classList.toggle('hidden',items.length!==0);document.getElementById('rows').innerHTML=items.map((c,i)=>`<tr><td><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="asset-id">${esc(c.asset_id)}</div></td><td><div class="mono">${esc(c.asset_ip)}</div><div class="muted">${esc(c.node)}</div></td><td>${actionButtons(c,i)}</td><td>${statusChip(c.confirmation_state)}<br><span class="muted">${esc(c.confirmation_reason||c.planned_action||'disable')}</span></td><td class="reason">${esc(c.latest_reason||'-')}</td><td><div class="mono">${esc((c.evidence_run_ids||[]).join(' / '))}</div><div class="muted">${esc((c.evidence_paths||[]).slice(-1)[0]||'')}</div></td></tr>`).join('');document.getElementById('cards').innerHTML=items.map((c,i)=>`<article class="mobile-card"><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="muted mono">${esc(c.asset_ip)} · ${esc(c.node)}</div><p>${esc(c.latest_reason||'-')}</p>${statusChip(c.confirmation_state)}${actionButtons(c,i)}</article>`).join('');bindActions(items);document.getElementById('out').textContent=JSON.stringify(latestData,null,2);}
+function render(){renderStats();const items=filtered();document.getElementById('empty').classList.toggle('hidden',items.length!==0);document.getElementById('rows').innerHTML=items.map((c,i)=>`<tr><td><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="asset-id">${esc(c.asset_id)}</div></td><td><div class="mono">${esc(c.asset_ip)}</div><div class="muted">${esc(c.node)}</div></td><td>${actionButtons(c,i)}</td><td>${statusChip(c.confirmation_state)}<br><span class="muted">${esc(c.confirmation_reason||c.planned_action||'disable')}</span></td><td class="reason">${esc(c.latest_reason||'-')}</td><td>${pingEvidence(c)}</td><td><span class="muted">${esc(c.ip_reachability_checked_at||'-')}</span></td><td><div class="mono">${esc((c.evidence_run_ids||[]).join(' / '))}</div><div class="muted">${esc((c.evidence_paths||[]).slice(-1)[0]||'')}</div></td></tr>`).join('');document.getElementById('cards').innerHTML=items.map((c,i)=>`<article class="mobile-card"><div class="asset-name">${esc(c.asset_name||'-')}</div><div class="muted mono">${esc(c.asset_ip)} · ${esc(c.node)}</div><p>${esc(c.latest_reason||'-')}</p><p>IP 可达性：${pingEvidence(c)} · Ping 时间：${esc(c.ip_reachability_checked_at||'-')}</p>${statusChip(c.confirmation_state)}${actionButtons(c,i)}</article>`).join('');bindActions(items);document.getElementById('out').textContent=JSON.stringify(latestData,null,2);}
 function unlock(){document.getElementById('loginScreen').classList.add('hidden');document.getElementById('appShell').classList.remove('app-locked');}
 function lock(msg=''){document.getElementById('loginScreen').classList.remove('hidden');document.getElementById('appShell').classList.add('app-locked');if(msg)document.getElementById('loginMsg').textContent=msg;}
 function load(){document.getElementById('updatedAt').textContent='刷新中...';const p=encodeURIComponent(selectedProfile());fetch('/api/candidates?profile='+p,{credentials:'same-origin'}).then(r=>{if(r.status===401){lock('请先登录');throw new Error('login required');}return r.json().then(data=>({ok:r.ok,status:r.status,data}));}).then(res=>{if(!res.ok)throw new Error(res.status+' '+JSON.stringify(res.data));latestData=res.data;currentProfile=latestData.profile||selectedProfile();if(latestData.profiles)renderProfiles(latestData.profiles);document.getElementById('updatedAt').textContent='最近刷新 '+new Date().toLocaleString();render();}).catch(err=>{if(String(err)!=='Error: login required'){document.getElementById('updatedAt').textContent='加载失败';toast(String(err),true);}});}

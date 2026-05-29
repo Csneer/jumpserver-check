@@ -85,6 +85,44 @@ def test_duplicate_asset_annotation_overrides_probe_status():
     assert "current-record" in results[1]["remark"]
 
 
+
+
+
+def test_ops_reached_error_paths_mark_ops_connectivity_ok():
+    cases = [
+        "Module is not supported",
+        "bash: syntax error near unexpected token",
+        "DETECT_START\nBROKEN=1",
+    ]
+    for log in cases:
+        result = check.classify_probe_result({"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}, log)
+        assert result["connectivity"] == "ok"
+        assert result["ops_connectivity"] == "ok"
+
+def test_successful_parse_marks_ops_connectivity_ok():
+    result = check.classify_probe_result(
+        {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"},
+        "DETECT_START\nIP_ADDR=192.0.2.10\nIP_ADDRS=192.0.2.10\nIF_NAME=eth0\nIP_TYPE=static\nDETECT_END",
+    )
+
+    assert result["probe_status"] == "ok_static"
+    assert result["connectivity"] == "ok"
+    assert result["ops_connectivity"] == "ok"
+
+def test_skipped_windows_result_uses_common_reachability_schema():
+    result = check.skipped_windows_result({"id": "win-1", "name": "win", "address": "192.0.2.50", "platform": "Windows"})
+
+    assert result["connectivity"] == "skipped"
+    assert result["ops_connectivity"] == "skipped"
+    assert result["ip_reachability"] == "not_checked"
+    assert result["ip_reachability_command"] == []
+
+
+def test_ping_worker_count_is_capped():
+    assert check.bounded_ip_ping_workers(0) == 1
+    assert check.bounded_ip_ping_workers(32) == 32
+    assert check.bounded_ip_ping_workers(999) == 64
+
 def test_detection_command_is_read_only_and_has_markers():
     command = check.DETECTION_COMMAND
 

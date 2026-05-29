@@ -9,6 +9,17 @@ def auth_cookie(token="secret"):
     return {"Cookie": f"{admin.SESSION_COOKIE}={cookie}", "X-CSRF-Token": csrf}
 
 
+
+def stub_current_candidate(monkeypatch, *, profile="local"):
+    def fake_evaluate_cleanup(**kwargs):
+        return {
+            "profile": kwargs["profile"],
+            "candidates": [{"asset_id": "asset-1", "evidence_run_ids": ["run-1"], "evidence_paths": ["raw.json"]}],
+            "review_required": [],
+            "skipped": [],
+        }
+    monkeypatch.setattr(admin.host_cleanup, "evaluate_cleanup", fake_evaluate_cleanup)
+
 def test_get_candidates_requires_login_and_has_no_cors_wildcard(tmp_path, monkeypatch):
     monkeypatch.setattr(
         admin.host_cleanup,
@@ -86,7 +97,8 @@ def test_write_endpoints_require_login(tmp_path):
     assert response.status == 401
 
 
-def test_post_confirm_writes_confirmation_for_selected_profile(tmp_path):
+def test_post_confirm_writes_confirmation_for_selected_profile(tmp_path, monkeypatch):
+    stub_current_candidate(monkeypatch)
     context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret", allowed_profiles=("ops",))
     payload = {
         "profile": "ops",
@@ -112,7 +124,8 @@ def test_post_confirm_writes_confirmation_for_selected_profile(tmp_path):
     assert registry["confirmed_hosts"][0]["asset_id"] == "asset-1"
 
 
-def test_post_confirm_rejects_delete_without_ack(tmp_path):
+def test_post_confirm_rejects_delete_without_ack(tmp_path, monkeypatch):
+    stub_current_candidate(monkeypatch)
     context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
     payload = {
         "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
@@ -287,6 +300,7 @@ def test_login_rejected_when_no_token_configured(tmp_path):
 
 
 def test_confirm_notifies_wecom_when_enabled(tmp_path, monkeypatch):
+    stub_current_candidate(monkeypatch)
     monkeypatch.setenv("WECOM_NOTIFY_ADMIN_ACTIONS", "1")
     monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
 
@@ -317,6 +331,7 @@ def test_confirm_notifies_wecom_when_enabled(tmp_path, monkeypatch):
 
 
 def test_write_endpoints_skip_notification_when_not_configured(tmp_path, monkeypatch):
+    stub_current_candidate(monkeypatch)
     monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)
 
     sent = []
@@ -343,6 +358,7 @@ def test_write_endpoints_skip_notification_when_not_configured(tmp_path, monkeyp
 
 
 def test_notification_failure_does_not_block_confirm(tmp_path, monkeypatch):
+    stub_current_candidate(monkeypatch)
     monkeypatch.setenv("WECOM_NOTIFY_ADMIN_ACTIONS", "1")
     monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
 
@@ -418,3 +434,66 @@ def test_candidates_payload_can_include_review_required(tmp_path, monkeypatch):
 
     body = json.loads(response.body)
     assert body["review_required"][0]["reason"] == "ip_reachable_requires_review"
+
+
+
+def test_confirm_rejects_review_required_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        admin.host_cleanup,
+        "evaluate_cleanup",
+        lambda **kwargs: {
+            "profile": kwargs["profile"],
+            "candidates": [],
+            "review_required": [{"asset_id": "asset-1", "reason": "ip_reachable_requires_review", "evidence_run_ids": ["run-1"], "evidence_paths": ["r1.json"]}],
+            "skipped": [],
+        },
+    )
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    payload = json.dumps({
+        "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
+        "operator": "admin",
+        "reason": "unsafe confirm",
+        "action": "disable",
+        "source_evidence_run_ids": ["run-1"],
+        "source_evidence_paths": ["r1.json"],
+    }).encode()
+
+    response = admin.handle_request("POST", "/api/confirm", auth_cookie(), payload, context)
+
+    assert response.status == 409
+    assert json.loads(response.body)["error"] == "asset_requires_review"
+
+
+def test_confirm_requires_current_candidate_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        admin.host_cleanup,
+        "evaluate_cleanup",
+        lambda **kwargs: {
+            "profile": kwargs["profile"],
+            "candidates": [{"asset_id": "asset-1", "evidence_run_ids": ["run-1", "run-2"], "evidence_paths": ["r1.json", "r2.json"]}],
+            "review_required": [],
+            "skipped": [],
+        },
+    )
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    payload = json.dumps({
+        "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
+        "operator": "admin",
+        "reason": "confirm",
+        "action": "disable",
+        "source_evidence_run_ids": ["old-1", "old-2"],
+        "source_evidence_paths": ["old-1.json", "old-2.json"],
+    }).encode()
+
+    response = admin.handle_request("POST", "/api/confirm", auth_cookie(), payload, context)
+
+    assert response.status == 409
+    assert json.loads(response.body)["error"] == "candidate_evidence_mismatch"
+
+def test_cleanup_admin_html_has_first_class_ping_evidence_columns():
+    html = admin.page_html()
+
+    assert "IP 可达性" in html
+    assert "Ping 时间" in html
+    assert "pingEvidence" in html
+    assert "ip_reachability_checked_at" in html

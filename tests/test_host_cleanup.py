@@ -402,7 +402,47 @@ def test_ping_reachable_evidence_requires_review_not_cleanup_candidate(tmp_path)
 
     assert plan["candidates"] == []
     assert plan["review_required"][0]["reason"] == "ip_reachable_requires_review"
+    assert plan["review_required"][0]["evidence_run_ids"] == ["run-1", "run-2"]
 
+
+
+def test_ping_reachable_in_first_required_run_still_surfaces_review_required(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    write_raw(raw / "r1.json", "run-1", [{**result(), "probe_status": "jumpserver_unreachable_ip_reachable", "ip_reachability": "reachable", "ip_reachability_checked_at": "2026-05-20T09:00:01+08:00", "ip_reachability_remark": "ping reachable first"}], started_at="2026-05-20T09:00:00+08:00")
+    write_raw(raw / "r2.json", "run-2", [result()], started_at="2026-05-27T09:00:00+08:00")
+
+    plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=tmp_path / "state", output_dir=tmp_path / "cleanup")
+
+    assert plan["candidates"] == []
+    assert plan["review_required"][0]["reason"] == "ip_reachable_requires_review"
+    assert plan["review_required"][0]["ip_reachability_remark"] == "ping reachable first"
+    assert plan["review_required"][0]["ip_reachability_checked_at"] == "2026-05-20T09:00:01+08:00"
+    assert plan["review_required"][0]["evidence_run_ids"] == ["run-1", "run-2"]
+
+
+def test_apply_cleanup_plan_skips_when_fresh_required_run_has_ping_reachable(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    state = tmp_path / "state"
+    output = tmp_path / "cleanup"
+    write_raw(raw / "r1.json", "run-1", [{**result(), "probe_status": "jumpserver_unreachable_ip_reachable", "ip_reachability": "reachable"}], started_at="2026-05-20T09:00:00+08:00")
+    write_raw(raw / "r2.json", "run-2", [result()], started_at="2026-05-27T09:00:00+08:00")
+    stale_candidate = {
+        "profile": "local",
+        "asset_id": "asset-1",
+        "asset_name": "host-a",
+        "asset_ip": "192.0.2.10",
+        "planned_action": "disable",
+        "confirmation_state": "confirmed",
+        "evidence_run_ids": ["old-1", "old-2"],
+        "evidence_paths": ["old-1.json", "old-2.json"],
+    }
+    plan = {"profile": "local", "raw_dir": str(raw), "candidates": [stale_candidate]}
+
+    payload = host_cleanup.apply_cleanup_plan(plan, profile="local", state_dir=state, output_dir=output, client=object())
+
+    assert payload["results"][0]["status"] == "skipped_not_current_candidate"
 
 def test_is_unreachable_result_rejects_ping_reachable():
     assert host_cleanup.is_unreachable_result({"probe_status": "unreachable", "connectivity": "unreachable", "ip_reachability": "reachable"}) is False

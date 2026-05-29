@@ -249,6 +249,9 @@ def build_candidate(profile: str, asset_id: str, evidences: list[dict[str, Any]]
         "evidence_run_ids": [str(item.get("run_id") or "") for item in evidences[-2:]],
         "evidence_paths": [str(item.get("raw_path") or "") for item in evidences[-2:]],
         "latest_reason": last_result.get("remark") or "",
+        "ip_reachability": last_result.get("ip_reachability") or "",
+        "ip_reachability_checked_at": last_result.get("ip_reachability_checked_at") or "",
+        "ip_reachability_remark": last_result.get("ip_reachability_remark") or "",
     }
     if confirmation_reason:
         candidate["confirmation_reason"] = confirmation_reason
@@ -271,6 +274,27 @@ def is_cleanup_ready_candidate(candidate: dict[str, Any]) -> bool:
     return candidate.get("confirmation_state") == "confirmed"
 
 
+def has_ping_reachable_evidence(result: dict[str, Any]) -> bool:
+    return str(result.get("ip_reachability") or "") == "reachable" or result_status(result) == "jumpserver_unreachable_ip_reachable"
+
+
+def build_review_required_item(asset_id: str, evidences: list[dict[str, Any]]) -> dict[str, Any]:
+    reachable = next((item for item in reversed(evidences) if has_ping_reachable_evidence(item["result"])), evidences[-1])
+    result = reachable["result"]
+    return {
+        "asset_id": asset_id,
+        "asset_name": result.get("asset_name") or "",
+        "asset_ip": result.get("asset_ip") or "",
+        "node": result.get("node") or "",
+        "reason": "ip_reachable_requires_review",
+        "ip_reachability": "reachable",
+        "ip_reachability_checked_at": result.get("ip_reachability_checked_at") or "",
+        "ip_reachability_remark": result.get("ip_reachability_remark") or result.get("remark") or "",
+        "evidence_run_ids": [str(item.get("run_id") or "") for item in evidences],
+        "evidence_paths": [str(item.get("raw_path") or "") for item in evidences],
+    }
+
+
 def latest_review_required(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest_by_asset: dict[str, dict[str, Any]] = {}
     for raw in records:
@@ -287,20 +311,8 @@ def latest_review_required(records: list[dict[str, Any]]) -> list[dict[str, Any]
             }
     reviews: list[dict[str, Any]] = []
     for asset_id, item in sorted(latest_by_asset.items()):
-        result = item["result"]
-        if str(result.get("ip_reachability") or "") != "reachable" and str(result.get("probe_status") or "") != "jumpserver_unreachable_ip_reachable":
-            continue
-        reviews.append({
-            "asset_id": asset_id,
-            "asset_name": result.get("asset_name") or "",
-            "asset_ip": result.get("asset_ip") or "",
-            "node": result.get("node") or "",
-            "reason": "ip_reachable_requires_review",
-            "ip_reachability": "reachable",
-            "ip_reachability_remark": result.get("ip_reachability_remark") or "",
-            "evidence_run_ids": [str(item.get("run_id") or "")],
-            "evidence_paths": [str(item.get("raw_path") or "")],
-        })
+        if has_ping_reachable_evidence(item["result"]):
+            reviews.append(build_review_required_item(asset_id, [item]))
     return reviews
 
 
@@ -326,12 +338,23 @@ def evaluate_cleanup(profile: str, raw_dir: Path, state_dir: Path, output_dir: P
     skipped: list[dict[str, Any]] = []
     generated_at = now_iso()
     latest_required_run_ids = [str(raw.get("run_id") or "") for raw in records[-2:]]
-    review_required.extend(latest_review_required(records))
-    review_ids = {str(item.get("asset_id") or "") for item in review_required}
+    review_by_asset = {str(item.get("asset_id") or ""): item for item in latest_review_required(records)}
+    review_required.extend(review_by_asset.values())
+    review_ids = set(review_by_asset)
 
     for asset_id, evidences in sorted(unreachable.items()):
-        latest_reachable = any(str(item["result"].get("ip_reachability") or "") == "reachable" or str(item["result"].get("probe_status") or "") == "jumpserver_unreachable_ip_reachable" for item in evidences[-2:]) if len(evidences) >= 2 else False
-        if asset_id in review_ids or latest_reachable:
+        last_two_or_less = evidences[-2:]
+        latest_reachable = any(has_ping_reachable_evidence(item["result"]) for item in last_two_or_less)
+        if latest_reachable:
+            review_item = build_review_required_item(asset_id, last_two_or_less)
+            if asset_id in review_by_asset:
+                review_by_asset[asset_id].update(review_item)
+            else:
+                review_by_asset[asset_id] = review_item
+                review_required.append(review_item)
+                review_ids.add(asset_id)
+            continue
+        if asset_id in review_ids:
             continue
         if latest_status.get(asset_id) != "unreachable":
             skipped.append({"asset_id": asset_id, "reason": "latest_status_not_unreachable"})

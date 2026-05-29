@@ -20,5 +20,24 @@ def test_sop_embeds_detection_command_hash_and_no_placeholder_args():
     command_hash = __import__("hashlib").sha256(check.DETECTION_COMMAND.encode("utf-8")).hexdigest()
 
     assert f"DETECTION_COMMAND_SHA256={command_hash}" in sop
+    assert check.DETECTION_COMMAND in sop
     assert '"args": "<复合探测命令>"' not in sop
     assert "python3 scripts/run_multi_check.py --profiles local --no-proxy --require-wecom" in sop
+
+
+def test_sop_documents_ping_flags_and_raw_reachability_contract():
+    sop = Path("SOP_JumpServer主机探测与IP配置检测.md").read_text(encoding="utf-8")
+
+    for text in (
+        "--ip-reachability-check",
+        "--ip-ping-count",
+        "--ip-ping-timeout",
+        "--ip-ping-workers",
+        "ops_connectivity",
+        "ip_reachability",
+        "ip_reachability_checked_at",
+        "ip_reachability_remark",
+        "ops_task_ids",
+        "ip_reachability_config",
+    ):
+        assert text in sop

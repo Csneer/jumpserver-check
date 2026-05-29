@@ -1004,11 +1004,13 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         base["remark"] = remark or "JumpServer Ops 无可用登录账号"
         return base
     if "traceback" in lowered or "ansiballz_command.py" in lowered or "module_stderr" in lowered:
+        base["ops_connectivity"] = "ok"
         base["connectivity"] = "ok"
         base["probe_status"] = "ops_module_error"
         base["remark"] = remark or "Ops/Ansible 模块执行异常，未拿到有效探测输出"
         return base
     if "error! failed at splitting arguments" in lowered or "unbalanced jinja2 block or quotes" in lowered:
+        base["ops_connectivity"] = "ok"
         base["connectivity"] = "ok"
         base["probe_status"] = "parse_error"
         base["remark"] = remark or "JumpServer Ops 未能解析探测命令参数"
@@ -1021,6 +1023,7 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         or "command not found" in lowered
         or "not found" in lowered and "detect_start" in lowered
     ):
+        base["ops_connectivity"] = "ok"
         base["connectivity"] = "ok"
         base["probe_status"] = "probe_script_error"
         base["remark"] = remark or "远端探测脚本执行异常，未拿到有效探测输出"
@@ -1040,6 +1043,7 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
             base["probe_status"] = "ops_no_output"
             base["remark"] = remark or "Ops 任务成功但未返回主机输出"
             return base
+        base["ops_connectivity"] = "ok"
         base["connectivity"] = "ok"
         base["probe_status"] = "parse_error"
         base["remark"] = remark or "未找到 DETECT_START/DETECT_END 输出块"
@@ -1063,6 +1067,7 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
             "ip_match": ip_match,
             "if_name": values.get("IF_NAME") or "",
             "ip_type": ip_type,
+            "ops_connectivity": "ok",
             "connectivity": "ok",
         }
     )
@@ -1246,23 +1251,15 @@ def run_single_asset_jobs(
 
 
 def skipped_windows_result(asset: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "asset_id": asset.get("id"),
-        "asset_name": asset_name(asset),
-        "asset_ip": asset_ip(asset),
-        "actual_ip": "",
-        "actual_ips": "",
-        "ip_match": "",
-        "if_name": "",
-        "ip_type": "",
-        "connectivity": "skipped",
-        "probe_status": "skipped_windows",
-        "probe_source": "skipped",
-        "original_probe_status": "",
-        "original_remark": "",
-        "node": node_names(asset),
-        "remark": "Windows 资产按 SOP 跳过",
-    }
+    return base_result(asset, "skipped_windows", connectivity="skipped", remark="Windows 资产按 SOP 跳过", source="skipped")
+
+
+def bounded_ip_ping_workers(value: Any) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = 32
+    return min(max(1, workers), 64)
 
 
 def md_escape(value: Any) -> str:
@@ -1294,6 +1291,7 @@ def result_row(result: dict[str, Any]) -> list[Any]:
         result.get("if_name", ""),
         result.get("ip_type", ""),
         result.get("ip_reachability", ""),
+        result.get("ip_reachability_remark", ""),
         result.get("probe_status", ""),
         result.get("node", ""),
         result.get("probe_source", ""),
@@ -1382,7 +1380,7 @@ def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str]
 def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime, finished_at: dt.datetime, summary: dict[str, Any]) -> str:
     status_counts = probe_status_counts(results)
     abnormal = [result for result in results if result.get("probe_status") not in {"ok_static"}]
-    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "IP可达性", "探测状态", "节点", "探测来源", "备注"]
+    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "IP可达性", "IP可达性说明", "探测状态", "节点", "探测来源", "备注"]
     lines = [
         "# JumpServer 主机探测与 IP 配置检测报告",
         "",
@@ -1566,7 +1564,7 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
                     time.sleep(args.batch_gap)
     if getattr(args, "ip_reachability_check", False):
         ping_targets = [(idx, result) for idx, result in enumerate(results) if result.get("probe_status") == "unreachable"]
-        with ThreadPoolExecutor(max_workers=max(1, getattr(args, "ip_ping_workers", 32))) as executor:
+        with ThreadPoolExecutor(max_workers=bounded_ip_ping_workers(getattr(args, "ip_ping_workers", 32))) as executor:
             futures = {executor.submit(check_ip_reachability, str(result.get("asset_ip") or ""), count=max(1, getattr(args, "ip_ping_count", 1)), timeout=max(1, getattr(args, "ip_ping_timeout", 1))): idx for idx, result in ping_targets}
             for future in as_completed(list(futures.keys())):
                 idx = futures[future]
@@ -1606,7 +1604,7 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             "command_sha256": hashlib.sha256(DETECTION_COMMAND.encode("utf-8")).hexdigest(),
             "ops_task_ids": [record.get("task_id") for record in batch_records if record.get("task_id")],
             "ip_reachability_enabled": bool(getattr(args, "ip_reachability_check", False)),
-            "ip_reachability_config": {"count": getattr(args, "ip_ping_count", 1), "timeout": getattr(args, "ip_ping_timeout", 1), "workers": getattr(args, "ip_ping_workers", 32)},
+            "ip_reachability_config": {"count": getattr(args, "ip_ping_count", 1), "timeout": getattr(args, "ip_ping_timeout", 1), "workers": bounded_ip_ping_workers(getattr(args, "ip_ping_workers", 32))},
         },
     )
     if can_resume and batch_records and all("results" in record for record in batch_records):
