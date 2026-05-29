@@ -976,3 +976,97 @@ def test_write_reports_includes_cleanup_provenance(tmp_path: Path):
     assert payload["profile"] == "local"
     assert payload["run_source"] == "weekly_scheduled"
     assert payload["cleanup_evidence_eligible"] is True
+
+
+
+def test_check_ip_reachability_uses_argv_and_records_reachable(monkeypatch):
+    called = {}
+
+    class Done:
+        returncode = 0
+
+    def fake_run(cmd, capture_output, text, timeout, check):
+        called["cmd"] = cmd
+        called["timeout"] = timeout
+        return Done()
+
+    monkeypatch.setattr(check.subprocess, "run", fake_run)
+    monkeypatch.setattr(check.time, "time", lambda: 100.0)
+
+    result = check.check_ip_reachability("192.0.2.10", count=1, timeout=1)
+
+    assert result["ip_reachability"] == "reachable"
+    assert result["ip_reachability_source"] == "deployment_host_ping"
+    assert result["ip_reachability_command"] == ["ping", "-c", "1", "-W", "1", "192.0.2.10"]
+    assert result["ip_reachability_exit_code"] == 0
+    assert called["cmd"] == ["ping", "-c", "1", "-W", "1", "192.0.2.10"]
+
+
+def test_check_ip_reachability_handles_timeout_and_invalid_ip(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=1)
+
+    monkeypatch.setattr(check.subprocess, "run", fake_run)
+    timeout_result = check.check_ip_reachability("192.0.2.10", count=1, timeout=1)
+    invalid_result = check.check_ip_reachability("not-an-ip", count=1, timeout=1)
+
+    assert timeout_result["ip_reachability"] == "unknown"
+    assert "timeout" in timeout_result["ip_reachability_remark"].lower()
+    assert invalid_result["ip_reachability"] == "unknown"
+    assert "invalid" in invalid_result["ip_reachability_remark"].lower()
+
+
+def test_classify_probe_result_downgrades_ops_unreachable_when_ping_reachable(monkeypatch):
+    asset = {"id": "asset-1", "name": "host-a", "address": "192.0.2.10"}
+    monkeypatch.setattr(check, "check_ip_reachability", lambda *args, **kwargs: {
+        "ip_reachability": "reachable",
+        "ip_reachability_source": "deployment_host_ping",
+        "ip_reachability_checked_at": "2026-05-29T10:00:00+08:00",
+        "ip_reachability_command": ["ping", "-c", "1", "-W", "1", "192.0.2.10"],
+        "ip_reachability_exit_code": 0,
+        "ip_reachability_duration_ms": 20,
+        "ip_reachability_remark": "ping reachable from deployment host",
+    })
+
+    result = check.classify_probe_result(asset, "fatal: [192.0.2.10]: UNREACHABLE! => failed to connect", ping_check=True)
+
+    assert result["probe_status"] == "jumpserver_unreachable_ip_reachable"
+    assert result["connectivity"] == "unreachable"
+    assert result["ops_connectivity"] == "unreachable"
+    assert result["ip_reachability"] == "reachable"
+
+
+def test_build_ops_payload_records_detection_command_hash():
+    payload = check.build_ops_payload([{"id": "asset-1", "nodes": []}], batch_index=1, timeout=-1)
+
+    assert payload["module"] == "shell"
+    assert payload["args"] == check.DETECTION_COMMAND
+
+
+
+def test_run_detect_uses_ip_ping_workers_executor(monkeypatch):
+    assets = [{"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "platform": {"name": "Linux"}, "nodes": []}]
+    monkeypatch.setattr(check, "validate", lambda client: {"ok": True})
+    monkeypatch.setattr(check, "fetch_active_assets", lambda client, page_size, max_assets=None: assets)
+    monkeypatch.setattr(check, "fetch_authorized_assets", lambda client, page_size: assets)
+    monkeypatch.setattr(check, "JumpServerClient", lambda no_proxy=False: object())
+    monkeypatch.setattr(check, "run_batch", lambda *args, **kwargs: {"results": [{**check.base_result(assets[0], "unreachable"), "asset_ip": "192.0.2.10"}], "task_id": "t1"})
+    monkeypatch.setattr(check, "duplicate_asset_map", lambda assets: {})
+    monkeypatch.setattr(check, "apply_duplicate_asset_annotations", lambda results, duplicates: None)
+    monkeypatch.setattr(check, "check_ip_reachability", lambda *args, **kwargs: {"ip_reachability": "unreachable", "ip_reachability_source": "deployment_host_ping", "ip_reachability_checked_at": "now", "ip_reachability_command": [], "ip_reachability_exit_code": 1, "ip_reachability_duration_ms": 1, "ip_reachability_remark": "x"})
+    monkeypatch.setattr(check, "write_reports", lambda *args, **kwargs: {"report": "r", "latest": "l", "raw": "x"})
+    captured = {}
+    class FakeExecutor:
+        def __init__(self, max_workers): captured['max_workers']=max_workers
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def submit(self, fn, *args, **kwargs):
+            class F:
+                def result(self_non): return fn(*args, **kwargs)
+            return F()
+    monkeypatch.setattr(check, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(check, "as_completed", lambda futures: futures)
+    args = check.argparse.Namespace(command='detect', no_proxy=True, page_size=100, max_assets=None, query='', output_dir='reports/yuque', raw_output_dir='artifacts/raw', retention_count=12, runas='root', profile='local', run_id='rid', run_source='manual', cleanup_evidence_eligible=False, resume=True, resume_state='artifacts/state/x.json', execution_mode='batch', batch_size=0, timeout=-1, wait_timeout=1200, poll_interval=30, batch_gap=0, concurrency=12, ip_reachability_check=True, ip_ping_count=1, ip_ping_timeout=1, ip_ping_workers=7)
+    result = check.run_detect(args)
+    assert captured['max_workers'] == 7
+    assert result['status_counts']['unreachable'] == 1

@@ -176,7 +176,11 @@ def result_status(result: dict[str, Any]) -> str:
 
 
 def is_unreachable_result(result: dict[str, Any]) -> bool:
-    return result_status(result) == "unreachable" and str(result.get("connectivity") or "") == "unreachable"
+    return result_status(result) == "unreachable" and str(result.get("connectivity") or "") == "unreachable" and str(result.get("ip_reachability") or "") != "reachable"
+
+
+def is_review_reachable_result(result: dict[str, Any]) -> bool:
+    return result_status(result) == "jumpserver_unreachable_ip_reachable" and str(result.get("connectivity") or "") == "unreachable"
 
 
 def index_unreachable(records: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -190,7 +194,7 @@ def index_unreachable(records: list[dict[str, Any]]) -> tuple[dict[str, list[dic
             if not asset_id:
                 continue
             latest_status[asset_id] = result_status(result)
-            if is_unreachable_result(result):
+            if is_unreachable_result(result) or is_review_reachable_result(result):
                 evidence = {
                     "run_id": raw.get("run_id"),
                     "run_source": raw.get("run_source"),
@@ -267,6 +271,39 @@ def is_cleanup_ready_candidate(candidate: dict[str, Any]) -> bool:
     return candidate.get("confirmation_state") == "confirmed"
 
 
+def latest_review_required(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest_by_asset: dict[str, dict[str, Any]] = {}
+    for raw in records:
+        for result in raw.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            asset_id = result_asset_id(result)
+            if not asset_id:
+                continue
+            latest_by_asset[asset_id] = {
+                "run_id": raw.get("run_id"),
+                "raw_path": raw.get("_path"),
+                "result": result,
+            }
+    reviews: list[dict[str, Any]] = []
+    for asset_id, item in sorted(latest_by_asset.items()):
+        result = item["result"]
+        if str(result.get("ip_reachability") or "") != "reachable" and str(result.get("probe_status") or "") != "jumpserver_unreachable_ip_reachable":
+            continue
+        reviews.append({
+            "asset_id": asset_id,
+            "asset_name": result.get("asset_name") or "",
+            "asset_ip": result.get("asset_ip") or "",
+            "node": result.get("node") or "",
+            "reason": "ip_reachable_requires_review",
+            "ip_reachability": "reachable",
+            "ip_reachability_remark": result.get("ip_reachability_remark") or "",
+            "evidence_run_ids": [str(item.get("run_id") or "")],
+            "evidence_paths": [str(item.get("raw_path") or "")],
+        })
+    return reviews
+
+
 def merge_fresh_candidate(plan_candidate: dict[str, Any], fresh_candidate: dict[str, Any]) -> dict[str, Any]:
     # Use freshly re-evaluated evidence/confirmation for mutation, but keep the
     # caller-visible planned action only when it matches the current confirmed action.
@@ -285,11 +322,17 @@ def evaluate_cleanup(profile: str, raw_dir: Path, state_dir: Path, output_dir: P
     confirmations = load_confirmations(state_dir)
     protections = load_protections(state_dir)
     candidates: list[dict[str, Any]] = []
+    review_required: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     generated_at = now_iso()
     latest_required_run_ids = [str(raw.get("run_id") or "") for raw in records[-2:]]
+    review_required.extend(latest_review_required(records))
+    review_ids = {str(item.get("asset_id") or "") for item in review_required}
 
     for asset_id, evidences in sorted(unreachable.items()):
+        latest_reachable = any(str(item["result"].get("ip_reachability") or "") == "reachable" or str(item["result"].get("probe_status") or "") == "jumpserver_unreachable_ip_reachable" for item in evidences[-2:]) if len(evidences) >= 2 else False
+        if asset_id in review_ids or latest_reachable:
+            continue
         if latest_status.get(asset_id) != "unreachable":
             skipped.append({"asset_id": asset_id, "reason": "latest_status_not_unreachable"})
             continue
@@ -326,8 +369,9 @@ def evaluate_cleanup(profile: str, raw_dir: Path, state_dir: Path, output_dir: P
         "raw_dir": str(raw_dir),
         "state_dir": str(state_dir),
         "candidates": candidates,
+        "review_required": review_required,
         "skipped": skipped,
-        "summary": {"candidates": len(candidates), "skipped": len(skipped), "eligible_runs": len(records)},
+        "summary": {"candidates": len(candidates), "review_required": len(review_required), "skipped": len(skipped), "eligible_runs": len(records)},
     }
     if write_plan:
         output_dir.mkdir(parents=True, exist_ok=True)

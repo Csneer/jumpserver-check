@@ -272,3 +272,15 @@ def test_send_admin_action_notification_sends_via_webhook(monkeypatch):
     assert "确认废弃" in sent_payloads[0]["payload"]["markdown"]["content"]
     assert "http://10.0.0.100:8088/" in sent_payloads[0]["payload"]["markdown"]["content"]
     assert sent_payloads[0]["timeout"] == 10
+
+
+
+def test_new_ping_review_status_has_label():
+    assert notify.status_count_label("jumpserver_unreachable_ip_reachable") == "JumpServer不可达但IP可达"
+
+    summary = {
+        "summary": {"total_assets": 3, "linux_assets": 3},
+        "status_counts": {"jumpserver_unreachable_ip_reachable": 2},
+    }
+    message = notify.build_markdown_message("success", "JumpServer 每周主机巡检", summary)
+    assert "JumpServer不可达但IP可达: 2" in message

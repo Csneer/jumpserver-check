@@ -389,3 +389,33 @@ def test_scrub_sensitive_removes_secret_keys():
     scrubbed = host_cleanup.scrub_sensitive(data)
 
     assert scrubbed == {"name": "host-a", "nested": {"safe": "kept"}, "items": [{}, {"ok": True}]}
+
+
+
+def test_ping_reachable_evidence_requires_review_not_cleanup_candidate(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    write_raw(raw / "r1.json", "run-1", [result()], started_at="2026-05-20T09:00:00+08:00")
+    write_raw(raw / "r2.json", "run-2", [{**result(), "probe_status": "jumpserver_unreachable_ip_reachable", "ip_reachability": "reachable", "ip_reachability_remark": "ping reachable"}], started_at="2026-05-27T09:00:00+08:00")
+
+    plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=tmp_path / "state", output_dir=tmp_path / "cleanup")
+
+    assert plan["candidates"] == []
+    assert plan["review_required"][0]["reason"] == "ip_reachable_requires_review"
+
+
+def test_is_unreachable_result_rejects_ping_reachable():
+    assert host_cleanup.is_unreachable_result({"probe_status": "unreachable", "connectivity": "unreachable", "ip_reachability": "reachable"}) is False
+    assert host_cleanup.is_unreachable_result({"probe_status": "jumpserver_unreachable_ip_reachable", "connectivity": "unreachable", "ip_reachability": "reachable"}) is False
+
+
+
+def test_latest_single_ping_reachable_still_surfaces_review_required(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    write_raw(raw / "r1.json", "run-1", [{**result(status="ok_static"), "connectivity": "ok"}], started_at="2026-05-20T09:00:00+08:00")
+    write_raw(raw / "r2.json", "run-2", [{**result(), "probe_status": "jumpserver_unreachable_ip_reachable", "ip_reachability": "reachable", "ip_reachability_remark": "ping reachable"}], started_at="2026-05-27T09:00:00+08:00")
+
+    plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=tmp_path / "state", output_dir=tmp_path / "cleanup")
+
+    assert plan["review_required"][0]["reason"] == "ip_reachable_requires_review"

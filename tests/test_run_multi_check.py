@@ -88,3 +88,17 @@ def test_build_profile_command_passes_cleanup_flags():
     assert "--cleanup-allow-delete" in command
     assert command[command.index("--run-source") + 1] == "weekly_scheduled"
     assert "--cleanup-evidence-eligible" in command
+
+
+
+def test_build_profile_command_passes_ip_reachability_flags():
+    args = multi.parse_args.__globals__['argparse'].Namespace(
+        no_proxy=True, require_wecom=True, dry_run_yuque=False, dry_run_notify=False, cleanup_evaluate=False, cleanup_apply_confirmed=False,
+        cleanup_dry_run=False, cleanup_allow_delete=False, run_source='', cleanup_evidence_eligible=False, no_resume=False, wait_timeout=None,
+        poll_interval=None, ip_reachability_check=True, ip_ping_count=1, ip_ping_timeout=1, ip_ping_workers=32
+    )
+    cmd = multi.build_profile_command(args, 'local')
+    assert '--ip-reachability-check' in cmd
+    assert '--ip-ping-count' in cmd and '1' in cmd
+    assert '--ip-ping-timeout' in cmd and '1' in cmd
+    assert '--ip-ping-workers' in cmd and '32' in cmd

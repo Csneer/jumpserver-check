@@ -261,3 +261,30 @@ def test_run_workflow_cleanup_evaluate_records_summary(monkeypatch, tmp_path):
     assert record["cleanup"]["plan"]["summary"]["candidates"] == 1
     summary = json.loads(notify_calls[0]["summary_json"])
     assert summary["cleanup"]["plan"]["plan_path"] == str(tmp_path / "plan.json")
+
+
+
+def test_run_detect_subprocess_passes_ip_reachability_flags(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+        def poll(self): return 0
+        def communicate(self): return ('{}', '')
+
+    def fake_popen(command, cwd, text, stdout, stderr):
+        captured['command'] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(weekly.subprocess, 'Popen', fake_popen)
+    args = weekly.parse_args.__globals__['argparse'].Namespace(
+        no_proxy=True, poll_interval=30, output_dir='reports/yuque', raw_output_dir='artifacts/raw', retention_count=12,
+        profile='local', run_id='rid', run_source='weekly_scheduled', resume_state='artifacts/state/x.json', cleanup_evidence_eligible=True,
+        no_resume=False, query='', max_assets=None, ip_reachability_check=True, ip_ping_count=1, ip_ping_timeout=1, ip_ping_workers=32
+    )
+    weekly.run_detect_subprocess(args, 1200)
+    cmd = captured['command']
+    assert '--ip-reachability-check' in cmd
+    assert '--ip-ping-count' in cmd and '1' in cmd
+    assert '--ip-ping-timeout' in cmd and '1' in cmd
+    assert '--ip-ping-workers' in cmd and '32' in cmd

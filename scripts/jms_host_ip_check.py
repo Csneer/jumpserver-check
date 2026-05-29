@@ -6,12 +6,14 @@ import base64
 import datetime as dt
 import email.utils
 import hashlib
+import ipaddress
 import hmac
 import json
 import os
 import re
 import socket
 import ssl
+import subprocess
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,7 +47,7 @@ actual_ip="$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 if_name="$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
 
 if command -v ip >/dev/null 2>&1; then
-  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | awk '$0 !~ /^172\.17\./ && !seen[$0]++' | paste -sd, -)"
+  all_ips="$(ip -o -4 addr show scope global 2>/dev/null | awk '$2 !~ /^(cni|flannel[.]|cali|veth|kube-ipvs|br-|virbr|docker|tunl|ovs-system|gre|fe:)/ {split($4,a,"/"); print a[1]}' | awk '!seen[$0]++' | paste -sd, -)"
 fi
 
 if [ -z "$all_ips" ] && command -v hostname >/dev/null 2>&1; then
@@ -668,6 +670,45 @@ def mark_resume_state(path: Path, status: str, paths: dict[str, str] | None = No
     save_resume_state(path, state)
 
 
+def check_ip_reachability(asset_ip: str, *, count: int, timeout: int) -> dict[str, Any]:
+    checked_at = dt.datetime.now().astimezone().isoformat()
+    base = {
+        "ip_reachability": "unknown",
+        "ip_reachability_source": "deployment_host_ping",
+        "ip_reachability_checked_at": checked_at,
+        "ip_reachability_command": [],
+        "ip_reachability_exit_code": "",
+        "ip_reachability_duration_ms": "",
+        "ip_reachability_remark": "",
+    }
+    try:
+        ipaddress.ip_address((asset_ip or '').strip())
+    except ValueError:
+        base["ip_reachability_remark"] = "invalid asset ip"
+        return base
+    cmd = ["ping", "-c", str(count), "-W", str(timeout), asset_ip.strip()]
+    started = time.time()
+    base["ip_reachability_command"] = cmd
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 1) + 1, check=False)
+    except FileNotFoundError:
+        base["ip_reachability_remark"] = "ping command missing"
+        return base
+    except subprocess.TimeoutExpired:
+        base["ip_reachability_remark"] = "ping timeout"
+        return base
+    duration_ms = int((time.time() - started) * 1000)
+    base["ip_reachability_exit_code"] = completed.returncode
+    base["ip_reachability_duration_ms"] = duration_ms
+    if completed.returncode == 0:
+        base["ip_reachability"] = "reachable"
+        base["ip_reachability_remark"] = "ping reachable from deployment host"
+    else:
+        base["ip_reachability"] = "unreachable"
+        base["ip_reachability_remark"] = "ping unreachable from deployment host"
+    return base
+
+
 def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreachable", remark: str = "", source: str = "batch") -> dict[str, Any]:
     return {
         "asset_id": asset.get("id"),
@@ -678,7 +719,15 @@ def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreach
         "ip_match": "",
         "if_name": "",
         "ip_type": "",
+        "ops_connectivity": connectivity,
         "connectivity": connectivity,
+        "ip_reachability": "not_checked",
+        "ip_reachability_source": "",
+        "ip_reachability_checked_at": "",
+        "ip_reachability_command": [],
+        "ip_reachability_exit_code": "",
+        "ip_reachability_duration_ms": "",
+        "ip_reachability_remark": "",
         "probe_status": status,
         "probe_source": source,
         "original_probe_status": "",
@@ -938,7 +987,7 @@ def summary_message_for_asset(asset: dict[str, Any], summary: Any) -> str:
     return ""
 
 
-def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bool = False, remark: str = "") -> dict[str, Any]:
+def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bool = False, remark: str = "", *, ping_check: bool = False, ip_ping_count: int = 1, ip_ping_timeout: int = 1) -> dict[str, Any]:
     base = base_result(asset, "probe_timeout" if timed_out else "unreachable", remark=remark)
     if timed_out:
         return base
@@ -978,6 +1027,12 @@ def classify_probe_result(asset: dict[str, Any], log_segment: str, timed_out: bo
         return base
     if "unreachable" in lowered or "failed to connect" in lowered or "permission denied" in lowered:
         base["remark"] = remark or "JumpServer Ops 返回连接失败"
+        if ping_check:
+            reachability = check_ip_reachability(str(asset_ip(asset) or ""), count=ip_ping_count, timeout=ip_ping_timeout)
+            base.update(reachability)
+            if base.get("ip_reachability") == "reachable":
+                base["probe_status"] = "jumpserver_unreachable_ip_reachable"
+                base["remark"] = "JumpServer Ops 返回连接失败，但部署机可 ping 通资产 IP"
         return base
     values = parse_kv_block(log_segment)
     if values is None:
@@ -1238,6 +1293,7 @@ def result_row(result: dict[str, Any]) -> list[Any]:
         result.get("ip_match", ""),
         result.get("if_name", ""),
         result.get("ip_type", ""),
+        result.get("ip_reachability", ""),
         result.get("probe_status", ""),
         result.get("node", ""),
         result.get("probe_source", ""),
@@ -1250,6 +1306,7 @@ PROBLEM_STATUSES = (
     "manual_check",
     "ip_mismatch",
     "duplicate_asset",
+    "jumpserver_unreachable_ip_reachable",
     "unreachable",
     "api_error",
     "log_fetch_error",
@@ -1325,7 +1382,7 @@ def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str]
 def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime, finished_at: dt.datetime, summary: dict[str, Any]) -> str:
     status_counts = probe_status_counts(results)
     abnormal = [result for result in results if result.get("probe_status") not in {"ok_static"}]
-    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "探测状态", "节点", "探测来源", "备注"]
+    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "IP可达性", "探测状态", "节点", "探测来源", "备注"]
     lines = [
         "# JumpServer 主机探测与 IP 配置检测报告",
         "",
@@ -1347,6 +1404,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "manual_check",
             "ip_mismatch",
             "duplicate_asset",
+            "jumpserver_unreachable_ip_reachable",
             "unreachable",
             "api_error",
             "log_fetch_error",
@@ -1506,6 +1564,17 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
                 results.extend(batch_record.get("results", []))
                 if args.batch_gap > 0 and index < len(linux_batches):
                     time.sleep(args.batch_gap)
+    if getattr(args, "ip_reachability_check", False):
+        ping_targets = [(idx, result) for idx, result in enumerate(results) if result.get("probe_status") == "unreachable"]
+        with ThreadPoolExecutor(max_workers=max(1, getattr(args, "ip_ping_workers", 32))) as executor:
+            futures = {executor.submit(check_ip_reachability, str(result.get("asset_ip") or ""), count=max(1, getattr(args, "ip_ping_count", 1)), timeout=max(1, getattr(args, "ip_ping_timeout", 1))): idx for idx, result in ping_targets}
+            for future in as_completed(list(futures.keys())):
+                idx = futures[future]
+                reachability = future.result()
+                results[idx].update(reachability)
+                if results[idx].get("ip_reachability") == "reachable":
+                    results[idx]["probe_status"] = "jumpserver_unreachable_ip_reachable"
+                    results[idx]["remark"] = "JumpServer Ops 返回连接失败，但部署机可 ping 通资产 IP"
     duplicates = duplicate_asset_map(assets)
     apply_duplicate_asset_annotations(results, duplicates)
     summary = {
@@ -1534,6 +1603,10 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             "profile": getattr(args, "profile", "default"),
             "run_source": getattr(args, "run_source", "manual"),
             "cleanup_evidence_eligible": bool(getattr(args, "cleanup_evidence_eligible", False)),
+            "command_sha256": hashlib.sha256(DETECTION_COMMAND.encode("utf-8")).hexdigest(),
+            "ops_task_ids": [record.get("task_id") for record in batch_records if record.get("task_id")],
+            "ip_reachability_enabled": bool(getattr(args, "ip_reachability_check", False)),
+            "ip_reachability_config": {"count": getattr(args, "ip_ping_count", 1), "timeout": getattr(args, "ip_ping_timeout", 1), "workers": getattr(args, "ip_ping_workers", 32)},
         },
     )
     if can_resume and batch_records and all("results" in record for record in batch_records):
@@ -1586,6 +1659,10 @@ def main() -> None:
         action="store_true",
         help="mark this detect raw output as eligible evidence for cleanup evaluation",
     )
+    detect.add_argument("--ip-reachability-check", action=argparse.BooleanOptionalAction, default=(os.getenv("CHECK_IP_REACHABILITY", "false").lower() in {"1", "true", "yes"}), help="run deployment-host ping for Ops-unreachable assets")
+    detect.add_argument("--ip-ping-count", type=int, default=int(os.getenv("CHECK_IP_PING_COUNT", "1")))
+    detect.add_argument("--ip-ping-timeout", type=int, default=int(os.getenv("CHECK_IP_PING_TIMEOUT", "1")))
+    detect.add_argument("--ip-ping-workers", type=int, default=int(os.getenv("CHECK_IP_PING_WORKERS", "32")))
     detect.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="resume an unparsed all-in-one batch Ops task when possible")
     detect.add_argument("--resume-state", default=DEFAULT_RESUME_STATE, help="path to local inflight task state")
 

@@ -269,6 +269,8 @@ GET /api/v1/perms/users/self/assets/
 
 ## 6. 阶段三：构造复合探测命令
 
+当前版本远端只读探测命令签名：`DETECTION_COMMAND_SHA256=582ac4569b2e12c4d807fb74ef8afe0129569b634f4926fcff01b87ba23e44b4`。该命令块来源于 `scripts/jms_host_ip_check.py::DETECTION_COMMAND`，修改命令时必须同步更新本 SOP 与一致性测试。
+
 ### 6.1 设计原则
 
 - 命令输出采用**固定前缀键值对**格式，便于解析，不依赖正则。
@@ -318,6 +320,32 @@ ip -o -4 addr show scope global
 
 ---
 
+
+### 7.0 当前项目常用入口命令（供核查）
+
+手工多 profile 巡检入口示例：
+
+```bash
+python3 scripts/run_multi_check.py --profiles local --no-proxy --require-wecom
+```
+
+正式周巡检（产生 eligible cleanup 证据）示例：
+
+```bash
+python3 scripts/run_weekly_check.py \
+  --profile local \
+  --no-proxy \
+  --run-source weekly_scheduled \
+  --cleanup-evidence-eligible \
+  --cleanup-evaluate
+```
+
+`run_weekly_check.py` 最终会本地启动：
+
+```bash
+python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible]
+```
+
 ## 7. 阶段四：下发 Ops 任务并轮询结果
 
 ### 7.1 下发 Ops 作业
@@ -330,7 +358,7 @@ Content-Type: application/json
   "name": "jms-host-ip-check-YYYYMMDD-HHMMSS-batch-001",
   "type": "adhoc",
   "module": "shell",
-  "args": "<复合探测命令>",
+  "args": "见 6.x 当前版本 DETECTION_COMMAND（以 command_sha256 锁定）",
   "assets": ["asset_id_1"],
   "nodes": ["node_id_1"],
   "runas_policy": "skip",
@@ -648,6 +676,15 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 - `probe_timeout`
 - `parse_error`
 - `ops_task_failed` 但缺少主机级不可达证据
+- `jumpserver_unreachable_ip_reachable`（JumpServer 通道不可达但 IP 可达，必须人工复核）
+
+证据矩阵补充：
+
+| Ops 结果 | 部署机 ping 结果 | 展示状态 | 是否进入自动清理候选 |
+|---|---|---|---|
+| unreachable | reachable | `jumpserver_unreachable_ip_reachable` / 需人工复核 | 否 |
+| unreachable | unreachable | `unreachable` | 可继续作为证据，但仍需全部门控 |
+| unreachable | unknown | `unreachable` + ping 备注 | 保守，不增强证据 |
 
 #### 10.7.3 前端页面的数据展示
 

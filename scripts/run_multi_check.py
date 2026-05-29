@@ -54,6 +54,13 @@ def build_profile_command(args: argparse.Namespace, profile: str) -> list[str]:
         command.extend(["--run-source", args.run_source])
     if getattr(args, "cleanup_evidence_eligible", False):
         command.append("--cleanup-evidence-eligible")
+    if getattr(args, "ip_reachability_check", False):
+        command.append("--ip-reachability-check")
+    else:
+        command.append("--no-ip-reachability-check")
+    command.extend(["--ip-ping-count", str(getattr(args, "ip_ping_count", 1))])
+    command.extend(["--ip-ping-timeout", str(getattr(args, "ip_ping_timeout", 1))])
+    command.extend(["--ip-ping-workers", str(getattr(args, "ip_ping_workers", 32))])
     if args.no_resume:
         command.append("--no-resume")
     if args.wait_timeout is not None:
@@ -122,6 +129,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cleanup-allow-delete", action="store_true")
     parser.add_argument("--run-source", choices=("weekly_scheduled", "manual", "dry_run", "tmp_probe"), default="")
     parser.add_argument("--cleanup-evidence-eligible", action="store_true")
+    parser.add_argument("--ip-reachability-check", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--ip-ping-count", type=int, default=1)
+    parser.add_argument("--ip-ping-timeout", type=int, default=1)
+    parser.add_argument("--ip-ping-workers", type=int, default=32)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--wait-timeout", type=int)
     parser.add_argument("--poll-interval", type=int)

@@ -397,3 +397,24 @@ def test_protect_and_review_notify_when_enabled(tmp_path, monkeypatch):
     assert "标记复查" in sent[1]["markdown"]["content"]
 
     monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)
+
+
+
+def test_candidates_payload_can_include_review_required(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        admin.host_cleanup,
+        "evaluate_cleanup",
+        lambda **kwargs: {
+            "profile": kwargs["profile"],
+            "candidates": [],
+            "review_required": [{"asset_id": "asset-1", "reason": "ip_reachable_requires_review", "ip_reachability": "reachable"}],
+            "skipped": [],
+            "summary": {"review_required": 1},
+        },
+    )
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+
+    response = admin.handle_request("GET", "/api/candidates", auth_cookie(), b"", context)
+
+    body = json.loads(response.body)
+    assert body["review_required"][0]["reason"] == "ip_reachable_requires_review"
