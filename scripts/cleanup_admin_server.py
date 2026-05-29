@@ -390,7 +390,7 @@ INDEX_HTML = """<!doctype html>
         <div class="field"><label for="profileSelect">JumpServer 配置</label><select id="profileSelect"></select></div>
         <div class="field"><label for="operator">操作人</label><input id="operator" placeholder="例如：admin / zhangsan"></div>
         <div class="field"><label for="reason">处理原因</label><input id="reason" placeholder="例如：业务下线，负责人确认废弃"></div>
-        <div class="field"><label for="stateFilter">状态筛选</label><select id="stateFilter"><option value="">全部候选</option><option value="missing_confirmation">待确认</option><option value="confirmed">已确认可等待 apply</option><option value="confirmed_wait_next_scheduled_run">等待下次巡检</option><option value="stale_confirmation">确认已过期</option></select></div>
+        <div class="field"><label for="stateFilter">状态筛选</label><select id="stateFilter"><option value="">全部候选</option><option value="missing_confirmation">待确认</option><option value="confirmed">已确认</option><option value="confirmed_wait_next_scheduled_run">等待下次巡检</option><option value="stale_confirmation">确认已过期</option></select></div>
         <button class="btn ghost" id="logoutBtn" type="button">退出登录</button>
       </div>
     </div>
@@ -427,7 +427,9 @@ function postDecision(route,payload,okMsg){try{validateForm();}catch(e){toast(e.
 function confirmAbandon(c){showModal('确认废弃','选择对资产 '+(c.asset_name||c.asset_id)+' 的处理方式：',[{key:'disable',label:'禁用（推荐）',cls:'primary'},{key:'delete',label:'删除（危险）',cls:'danger-solid'}]).then(choice=>{if(!choice)return;const p=basePayload(c);p.action=choice;if(choice==='delete')p.delete_ack='DELETE '+c.asset_id;postDecision('/api/confirm',p,choice==='disable'?'已写入确认废弃/禁用清单':'已写入危险删除确认');});}
 function protect(c){postDecision('/api/protect',basePayload(c),'已加入保护清单');}
 function review(c){postDecision('/api/review',basePayload(c),'已标记为需复查');}
-function statusChip(state){return `<span class="chip ${esc(state||'missing_confirmation')}">${esc(state||'missing_confirmation')}</span>`;}
+const STATE_LABELS={missing_confirmation:'待确认',confirmed:'已确认',confirmed_wait_next_scheduled_run:'等待下次巡检',stale_confirmation:'确认已过期',invalid_confirmation:'确认无效',delete:'待删除'};
+function stateLabel(s){return STATE_LABELS[s||'missing_confirmation']||s||'待确认';}
+function statusChip(state){const v=state||'missing_confirmation';return `<span class="chip ${esc(v)}">${esc(stateLabel(v))}</span>`;}
 function filtered(){const q=document.getElementById('search').value.trim().toLowerCase();const sf=document.getElementById('stateFilter').value;return (latestData.candidates||[]).filter(c=>{const text=[c.asset_name,c.asset_id,c.asset_ip,c.node,c.latest_reason,c.confirmation_state,c.confirmation_reason].join(' ').toLowerCase();return (!q||text.includes(q))&&(!sf||c.confirmation_state===sf);});}
 function renderProfiles(profiles){const sel=document.getElementById('profileSelect');const active=selectedProfile();sel.innerHTML=(profiles||[]).map(p=>`<option value="${esc(p.name)}" ${p.name===(active||currentProfile)?'selected':''}>${esc(p.label||p.name)}${p.has_config?'':'（仅运行参数）'}</option>`).join('');if(!sel.value&&profiles&&profiles[0])sel.value=profiles[0].name;currentProfile=sel.value||currentProfile;}
 function renderStats(){const c=latestData.candidates||[];const counts=c.reduce((m,x)=>(m[x.confirmation_state||'missing_confirmation']=(m[x.confirmation_state||'missing_confirmation']||0)+1,m),{});const s=latestData.summary||{};document.getElementById('stats').innerHTML=[['候选总数',s.candidates??c.length,'当前 profile：'+(latestData.profile||selectedProfile()||'-'),'warn'],['待确认',counts.missing_confirmation||0,'需要管理员判断','danger'],['已确认',counts.confirmed||0,'下次 apply 可继续门控','ok'],['等待复核',counts.confirmed_wait_next_scheduled_run||0,'确认后仍需下一轮巡检',''],['已跳过',s.skipped??0,'保护/证据不足等','']].map(([a,b,h,cls])=>`<div class="stat ${cls}"><div class="label">${a}</div><div class="value">${b}</div><div class="hint">${h}</div></div>`).join('');}
