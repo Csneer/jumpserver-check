@@ -284,3 +284,116 @@ def test_login_rejected_when_no_token_configured(tmp_path):
     response = admin.handle_request("POST", "/api/login", {}, b'{"token":"anything"}', context)
 
     assert response.status == 403
+
+
+def test_confirm_notifies_wecom_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("WECOM_NOTIFY_ADMIN_ACTIONS", "1")
+    monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
+
+    sent = []
+    monkeypatch.setattr(
+        admin.wecom_notify,
+        "send_wecom_message",
+        lambda url, payload, timeout=20: sent.append({"url": url, "payload": payload}) or {"errcode": 0},
+    )
+
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    payload = {
+        "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
+        "operator": "admin",
+        "reason": "decommissioned",
+        "action": "disable",
+        "source_evidence_run_ids": ["run-1"],
+        "source_evidence_paths": ["raw.json"],
+    }
+
+    response = admin.handle_request("POST", "/api/confirm", auth_cookie(), json.dumps(payload).encode(), context)
+
+    assert response.status == 200
+    assert len(sent) == 1
+    assert "确认废弃" in sent[0]["payload"]["markdown"]["content"]
+
+    monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)
+
+
+def test_write_endpoints_skip_notification_when_not_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)
+
+    sent = []
+    monkeypatch.setattr(
+        admin.wecom_notify,
+        "send_wecom_message",
+        lambda url, payload, timeout=20: sent.append(1) or {"errcode": 0},
+    )
+
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    payload = json.dumps({
+        "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
+        "operator": "admin",
+        "reason": "test",
+        "action": "disable",
+        "source_evidence_run_ids": ["run-1"],
+        "source_evidence_paths": ["raw.json"],
+    }).encode()
+
+    response = admin.handle_request("POST", "/api/confirm", auth_cookie(), payload, context)
+
+    assert response.status == 200
+    assert len(sent) == 0
+
+
+def test_notification_failure_does_not_block_confirm(tmp_path, monkeypatch):
+    monkeypatch.setenv("WECOM_NOTIFY_ADMIN_ACTIONS", "1")
+    monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
+
+    monkeypatch.setattr(
+        admin.wecom_notify,
+        "send_wecom_message",
+        lambda url, payload, timeout=20: (_ for _ in ()).throw(RuntimeError("webhook down")),
+    )
+
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    payload = json.dumps({
+        "asset": {"asset_id": "asset-1", "asset_name": "host-a", "asset_ip": "192.0.2.10"},
+        "operator": "admin",
+        "reason": "decommissioned",
+        "action": "disable",
+        "source_evidence_run_ids": ["run-1"],
+        "source_evidence_paths": ["raw.json"],
+    }).encode()
+
+    response = admin.handle_request("POST", "/api/confirm", auth_cookie(), payload, context)
+
+    assert response.status == 200
+    body = json.loads(response.body)
+    assert body["status"] == "confirmed"
+    assert (tmp_path / "cleanup_confirmed_hosts.json").exists()
+
+    monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)
+
+
+def test_protect_and_review_notify_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("WECOM_NOTIFY_ADMIN_ACTIONS", "1")
+    monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
+
+    sent = []
+    monkeypatch.setattr(
+        admin.wecom_notify,
+        "send_wecom_message",
+        lambda url, payload, timeout=20: sent.append(payload) or {"errcode": 0},
+    )
+
+    context = admin.AdminContext(profile="local", raw_dir=tmp_path, state_dir=tmp_path, output_dir=tmp_path, token="secret")
+    headers = auth_cookie()
+
+    protect_resp = admin.handle_request("POST", "/api/protect", headers, b'{"asset_id":"a1","reason":"keep"}', context)
+    assert protect_resp.status == 200
+
+    review_resp = admin.handle_request("POST", "/api/review", headers, b'{"asset_id":"a2","reason":"check"}', context)
+    assert review_resp.status == 200
+
+    assert len(sent) == 2
+    assert "保护" in sent[0]["markdown"]["content"]
+    assert "标记复查" in sent[1]["markdown"]["content"]
+
+    monkeypatch.delenv("WECOM_NOTIFY_ADMIN_ACTIONS", raising=False)

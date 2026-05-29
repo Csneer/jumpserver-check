@@ -36,6 +36,12 @@ STATUS_COUNT_LABELS = {
     "skipped_windows": "跳过Windows",
 }
 
+ACTION_LABELS = {
+    "confirm": "确认废弃",
+    "protect": "保护",
+    "review": "标记复查",
+}
+
 
 def load_dotenv() -> None:
     for env_path in (Path.cwd() / ".env", PROJECT_ROOT / ".env"):
@@ -294,6 +300,56 @@ def send_wecom_message(webhook_url: str, payload: dict[str, Any], timeout: int =
     if isinstance(result, dict) and result.get("errcode") not in (None, 0):
         raise RuntimeError(f"企业微信推送失败：{result}")
     return result if isinstance(result, dict) else {"response": result}
+
+
+def build_admin_action_message(action: str, record: dict[str, Any], admin_url: str = "") -> str:
+    label = ACTION_LABELS.get(action, action)
+    lines = [f"**操作**：{label}"]
+    asset_name = record.get("asset_name", "")
+    asset_ip = record.get("asset_ip", "")
+    if asset_name and asset_ip:
+        lines.append(f"**资产**：{asset_name}（{asset_ip}）")
+    elif asset_name:
+        lines.append(f"**资产**：{asset_name}")
+    elif asset_ip:
+        lines.append(f"**资产IP**：{asset_ip}")
+    asset_id = record.get("asset_id", "")
+    if asset_id:
+        lines.append(f"**资产ID**：{asset_id}")
+    profile = record.get("profile", "")
+    if profile:
+        lines.append(f"**Profile**：{profile}")
+    operator = record.get("operator", "")
+    if operator:
+        lines.append(f"**操作人**：{operator}")
+    reason = record.get("reason", "")
+    if reason:
+        lines.append(f"**原因**：{reason}")
+    timestamp = record.get("confirmed_at") or record.get("protected_at") or record.get("reviewed_at") or ""
+    if timestamp:
+        lines.append(f"**时间**：{timestamp}")
+    if admin_url:
+        lines.append(f"\n[查看管理页面]({admin_url})")
+    return "\n".join(lines)
+
+
+def send_admin_action_notification(
+    action: str,
+    record: dict[str, Any],
+    *,
+    webhook_url: str = "",
+    channel: str = "",
+    admin_url: str = "",
+) -> dict[str, Any]:
+    webhook_url = webhook_url or os.getenv("WECOM_WEBHOOK_URL", "").strip()
+    channel = channel or os.getenv("WECOM_CHANNEL", "wecom")
+    admin_url = admin_url or os.getenv("ACCESS_URL", "").strip()
+    if not webhook_url:
+        return {"status": "skipped", "reason": "WECOM_WEBHOOK_URL not configured"}
+    content = build_admin_action_message(action, record, admin_url=admin_url)
+    payload = build_wecom_payload(channel, "主机清理管理操作", content)
+    send_wecom_message(webhook_url, payload, timeout=10)
+    return {"status": "sent", "action": action}
 
 
 def notify(

@@ -196,3 +196,79 @@ def test_build_markdown_message_includes_cleanup_summary():
     assert "清理候选" in message
     assert "候选 2 / 跳过 1 / 执行结果 1" in message
     assert "artifacts/cleanup/local/plan.json" in message
+
+
+def test_build_admin_action_message_confirm():
+    record = {
+        "profile": "local",
+        "asset_id": "asset-1",
+        "asset_name": "web-server",
+        "asset_ip": "10.0.0.1",
+        "operator": "admin",
+        "reason": "业务下线",
+        "confirmed_at": "2026-05-29T10:30:00+08:00",
+    }
+
+    msg = notify.build_admin_action_message("confirm", record, admin_url="http://10.0.0.100:8088/")
+
+    assert "确认废弃" in msg
+    assert "web-server" in msg
+    assert "10.0.0.1" in msg
+    assert "admin" in msg
+    assert "业务下线" in msg
+    assert "2026-05-29T10:30:00+08:00" in msg
+    assert "[查看管理页面](http://10.0.0.100:8088/)" in msg
+
+
+def test_build_admin_action_message_protect_and_review():
+    protect_record = {"profile": "local", "asset_id": "asset-2", "reason": "仍在使用", "protected_at": "2026-05-29T11:00:00+08:00"}
+    review_record = {"profile": "local", "asset_id": "asset-3", "reason": "需确认", "reviewed_at": "2026-05-29T11:30:00+08:00"}
+
+    protect_msg = notify.build_admin_action_message("protect", protect_record)
+    review_msg = notify.build_admin_action_message("review", review_record)
+
+    assert "保护" in protect_msg
+    assert "标记复查" in review_msg
+    assert "asset-2" in protect_msg
+    assert "asset-3" in review_record["asset_id"]
+
+
+def test_build_admin_action_message_handles_missing_fields():
+    msg = notify.build_admin_action_message("confirm", {"asset_id": "only-id"})
+
+    assert "only-id" in msg
+    assert "确认废弃" in msg
+    assert "查看管理页面" not in msg
+
+
+def test_send_admin_action_notification_skips_without_webhook(monkeypatch):
+    monkeypatch.delenv("WECOM_WEBHOOK_URL", raising=False)
+
+    result = notify.send_admin_action_notification("confirm", {"asset_id": "a1"})
+
+    assert result["status"] == "skipped"
+
+
+def test_send_admin_action_notification_sends_via_webhook(monkeypatch):
+    monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://example.com/webhook")
+    monkeypatch.setenv("ACCESS_URL", "http://10.0.0.100:8088/")
+
+    sent_payloads = []
+
+    def mock_send(webhook_url, payload, timeout=20):
+        sent_payloads.append({"url": webhook_url, "payload": payload, "timeout": timeout})
+        return {"errcode": 0}
+
+    monkeypatch.setattr(notify, "send_wecom_message", mock_send)
+
+    record = {"profile": "local", "asset_id": "asset-1", "asset_name": "web", "confirmed_at": "2026-05-29T10:00:00+08:00"}
+    result = notify.send_admin_action_notification("confirm", record)
+
+    assert result["status"] == "sent"
+    assert result["action"] == "confirm"
+    assert len(sent_payloads) == 1
+    assert sent_payloads[0]["url"] == "https://example.com/webhook"
+    assert sent_payloads[0]["payload"]["msgtype"] == "markdown"
+    assert "确认废弃" in sent_payloads[0]["payload"]["markdown"]["content"]
+    assert "http://10.0.0.100:8088/" in sent_payloads[0]["payload"]["markdown"]["content"]
+    assert sent_payloads[0]["timeout"] == 10

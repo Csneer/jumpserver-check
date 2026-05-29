@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import host_cleanup, profile_env  # noqa: E402
+from scripts import host_cleanup, profile_env, wecom_notify  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -232,6 +232,15 @@ def write_review(state_dir: Path, *, profile: str, asset_id: str, reason: str, o
     return record
 
 
+def _notify_admin_action(action: str, record: dict[str, Any]) -> None:
+    if not os.getenv("WECOM_NOTIFY_ADMIN_ACTIONS", ""):
+        return
+    try:
+        wecom_notify.send_admin_action_notification(action, record)
+    except Exception as exc:
+        print(f"[cleanup-admin] wecom notify failed: {exc}", file=sys.stderr)
+
+
 def handle_request(method: str, path: str, headers: dict[str, str], body: bytes, context: AdminContext) -> Response:
     parsed = urlparse(path)
     route = parsed.path
@@ -303,6 +312,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
                     source_evidence_paths=[str(item) for item in payload.get("source_evidence_paths") or []],
                     delete_ack=str(payload.get("delete_ack") or ""),
                 )
+                _notify_admin_action("confirm", record)
                 return json_response(200, {"status": "confirmed", "record": record})
             if route == "/api/protect":
                 record = host_cleanup.write_protection(
@@ -312,6 +322,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
                     reason=str(payload.get("reason") or ""),
                     operator=str(payload.get("operator") or ""),
                 )
+                _notify_admin_action("protect", record)
                 return json_response(200, {"status": "protected", "record": record})
             record = write_review(
                 profile_context.state_dir or host_cleanup.cleanup_profile_state_dir(profile_context.profile),
@@ -320,6 +331,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes,
                 reason=str(payload.get("reason") or ""),
                 operator=str(payload.get("operator") or ""),
             )
+            _notify_admin_action("review", record)
             return json_response(200, {"status": "needs_review", "record": record})
         return json_response(404, {"error": "not_found"})
     except (ValueError, host_cleanup.CleanupError) as exc:
