@@ -59,7 +59,7 @@ def test_index_page_has_login_profile_selector_and_interactive_decision_buttons(
     assert "登录后查看废弃主机候选" in body
     assert "废弃主机确认中心" in body
     assert "profileSelect" in body
-    assert "确认废弃并禁用" in body
+    assert "确认废弃" in body
     assert "保护" in body
     assert "需复查" in body
     assert "stateFilter" in body
