@@ -34,6 +34,13 @@ def result(asset_id="asset-1", status="unreachable", ip="192.0.2.10", name="host
     }
 
 
+def mark_confirmed_before_next_run(state_dir: Path, confirmed_at="2026-05-28T09:00:00+08:00"):
+    path = state_dir / "cleanup_confirmed_hosts.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["confirmed_hosts"][0]["confirmed_at"] = confirmed_at
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
 def test_evaluate_requires_two_distinct_eligible_scheduled_unreachable_runs(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -121,6 +128,7 @@ def test_archive_before_mutation_and_disable_patch(tmp_path):
         source_evidence_run_ids=["run-1"],
         source_evidence_paths=["r1.json"],
     )
+    mark_confirmed_before_next_run(state)
     write_raw(raw / "r3.json", "run-3", [result()], started_at="2026-05-29T09:00:00+08:00")
     plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=state, output_dir=tmp_path / "cleanup")
 
@@ -196,6 +204,7 @@ def test_apply_re_evaluates_confirmation_and_protection_before_mutation(tmp_path
         source_evidence_run_ids=["run-1"],
         source_evidence_paths=["r1.json"],
     )
+    mark_confirmed_before_next_run(state)
     write_raw(raw / "r3.json", "run-3", [result()], started_at="2026-05-29T09:00:00+08:00")
     plan = host_cleanup.evaluate_cleanup(profile="local", raw_dir=raw, state_dir=state, output_dir=tmp_path / "cleanup")
     assert plan["candidates"][0]["confirmation_state"] == "confirmed"
