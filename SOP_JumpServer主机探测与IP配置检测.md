@@ -826,7 +826,7 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 
 - `JumpServer不可达但IP可达`、`JumpServer不可达但SSH端口开放` 必须与普通 `不可达` 分开显示，归入“需人工复核”；
 - cleanup 计划摘要必须显示“候选 / 需人工复核 / 跳过”，真实 apply 结果必须显示禁用、删除、跳过、失败数量；
-- 对真实删除动作必须推送企业微信管理操作通知，内容至少包含 profile、asset_id、asset_name、asset_ip、operator、reason、delete_ack、archive_path 或 result_path；
+- 对真实删除动作必须推送企业微信管理操作通知；批量删除通知必须先给出删除尝试数、成功数、失败数和 result_path，并默认只展开前 5 条必要明细（`WECOM_DELETE_DETAIL_LIMIT` 可调），超过上限时提示查看 cleanup result JSON；
 - 若本轮与上一轮无主机信息变动，通知必须明确写出“与上一轮结果对比无主机信息变动，已跳过语雀归档”；
 - 若发生主机变化，通知必须概括新增/消失/状态变化数量。
 
@@ -967,7 +967,7 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 - 被保护或跳过的原因
 - 存档路径
 
-真实 `delete` 的 apply result 必须携带或可直接关联 `profile`、`asset_id`、`asset_name`、`asset_ip`、`operator`、`reason`、`delete_ack`、`archive_path` 与 `result_path`。企业微信 delete 通知失败不得掩盖 delete 执行结果，但必须写入 workflow/apply 元数据供审计。
+真实 `delete` 的 apply result 必须携带或可直接关联 `profile`、`asset_id`、`asset_name`、`asset_ip`、`operator`、`reason`、`delete_ack`、`archive_path` 与 `result_path`。企业微信 delete 通知必须避免在大批量清理时展开过长明细：默认只展示前 5 条删除尝试，完整明细以 cleanup result JSON 为准。企业微信 delete 通知失败不得掩盖 delete 执行结果，但必须写入 workflow/apply 元数据供审计。
 
 这样可以确保“确认过什么、何时清理、为什么清理、清理前看到了什么证据”都能回溯。
 

@@ -45,6 +45,8 @@ ACTION_LABELS = {
     "delete": "删除资产",
 }
 
+DEFAULT_DELETE_DETAIL_LIMIT = 5
+
 
 def load_dotenv() -> None:
     for env_path in (Path.cwd() / ".env", PROJECT_ROOT / ".env"):
@@ -437,18 +439,33 @@ def deleted_apply_items(apply_result: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in delete_attempt_items(apply_result) if item.get("status") == "deleted"]
 
 
-def build_cleanup_delete_message(apply_result: dict[str, Any], admin_url: str = "") -> str:
+def delete_detail_limit(value: int | str | None = None) -> int:
+    raw = value if value is not None else os.getenv("WECOM_DELETE_DETAIL_LIMIT", "")
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        limit = DEFAULT_DELETE_DETAIL_LIMIT
+    return max(0, limit)
+
+
+def build_cleanup_delete_message(apply_result: dict[str, Any], admin_url: str = "", *, detail_limit: int | str | None = None) -> str:
     attempts = delete_attempt_items(apply_result)
     deleted = [item for item in attempts if item.get("status") == "deleted"]
     failed = [item for item in attempts if item.get("status") != "deleted"]
-    lines = [f"**操作**：删除资产", f"**删除数量**：{len(deleted)}", f"**删除失败**：{len(failed)}"]
+    limit = delete_detail_limit(detail_limit)
+    shown = attempts[:limit]
+    truncated = max(0, len(attempts) - len(shown))
+    lines = [f"**操作**：删除资产", f"**删除尝试**：{len(attempts)}", f"**删除数量**：{len(deleted)}", f"**删除失败**：{len(failed)}"]
     profile = apply_result.get("profile", "")
     if profile:
         lines.append(f"**Profile**：{profile}")
     result_path = apply_result.get("result_path", "")
     if result_path:
         lines.append(f"**清理结果**：`{result_path}`")
-    for idx, item in enumerate(attempts, 1):
+    if attempts:
+        lines.append("")
+        lines.append(f"前 {len(shown)} 条删除尝试：")
+    for idx, item in enumerate(shown, 1):
         asset_name = item.get("asset_name") or item.get("asset_id") or "-"
         asset_ip = item.get("asset_ip") or "-"
         status_text = "删除成功" if item.get("status") == "deleted" else "删除失败"
@@ -470,6 +487,8 @@ def build_cleanup_delete_message(apply_result: dict[str, Any], admin_url: str = 
             lines.append(f"   - 存档：`{item.get('archive_path')}`")
         if item.get("result_path"):
             lines.append(f"   - 结果：`{item.get('result_path')}`")
+    if truncated:
+        lines.extend(["", f"其余 {truncated} 条请查看清理结果 JSON。"])
     if admin_url:
         lines.append(f"\n[查看管理页面]({admin_url})")
     return "\n".join(lines)
@@ -481,16 +500,19 @@ def send_cleanup_delete_notification(
     webhook_url: str = "",
     channel: str = "",
     admin_url: str = "",
+    detail_limit: int | str | None = None,
 ) -> dict[str, Any]:
     attempts = delete_attempt_items(apply_result)
     deleted = [item for item in attempts if item.get("status") == "deleted"]
     failed = [item for item in attempts if item.get("status") != "deleted"]
+    limit = delete_detail_limit(detail_limit)
+    truncated = max(0, len(attempts) - min(limit, len(attempts)))
     if not attempts:
         return {"status": "skipped", "reason": "no delete attempts"}
     webhook_url = webhook_url or os.getenv("WECOM_WEBHOOK_URL", "").strip()
     channel = channel or os.getenv("WECOM_CHANNEL", "wecom")
     admin_url = admin_url or os.getenv("ACCESS_URL", "").strip()
-    content = build_cleanup_delete_message(apply_result, admin_url=admin_url)
+    content = build_cleanup_delete_message(apply_result, admin_url=admin_url, detail_limit=limit)
     payload = build_wecom_payload(channel, "主机清理删除操作", content)
     if not webhook_url:
         return {
@@ -499,11 +521,21 @@ def send_cleanup_delete_notification(
             "deleted_count": len(deleted),
             "delete_failed_count": len(failed),
             "delete_attempt_count": len(attempts),
+            "detail_limit": limit,
+            "truncated_count": truncated,
             "payload": payload,
             "content": content,
         }
     send_wecom_message(webhook_url, payload, timeout=10)
-    return {"status": "sent", "action": "delete", "deleted_count": len(deleted), "delete_failed_count": len(failed), "delete_attempt_count": len(attempts)}
+    return {
+        "status": "sent",
+        "action": "delete",
+        "deleted_count": len(deleted),
+        "delete_failed_count": len(failed),
+        "delete_attempt_count": len(attempts),
+        "detail_limit": limit,
+        "truncated_count": truncated,
+    }
 
 
 def notify(

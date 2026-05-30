@@ -46,6 +46,7 @@ YUQUE_PUBLIC=0
 
 WECOM_WEBHOOK_URL=
 WECOM_CHANNEL=wecom
+WECOM_DELETE_DETAIL_LIMIT=5
 
 CHECK_WAIT_TIMEOUT=1200
 CHECK_POLL_INTERVAL=30
@@ -501,7 +502,7 @@ python3 scripts/run_weekly_check.py \
 - 确认记录中包含 `delete_ack` 字段
 - 计划动作与确认动作一致
 
-真实 DELETE API 尝试（包括 `deleted` 和 `delete_failed`）会触发企业微信“主机清理删除操作”通知。通知会汇总本次 apply 中的删除成功数、删除失败数，并列出 profile、资产 ID/名称/IP、操作人、原因、`delete_ack`、存档路径、结果路径和 HTTP 状态。通知发送失败或通知结果回写失败不会掩盖清理结果，会记录到 `delete_notification` / `delete_notification_persist` 元数据中。
+真实 DELETE API 尝试（包括 `deleted` 和 `delete_failed`）会触发企业微信“主机清理删除操作”通知。通知会汇总本次 apply 中的删除尝试数、删除成功数、删除失败数，并默认只展开前 5 条必要明细（可通过 `WECOM_DELETE_DETAIL_LIMIT` 调整）；超过上限时提示“其余 N 条请查看清理结果 JSON”。完整审计字段仍保存在 `cleanup-result-*.json`，包括 profile、资产 ID/名称/IP、操作人、原因、`delete_ack`、存档路径、结果路径和 HTTP 状态。通知发送失败或通知结果回写失败不会掩盖清理结果，会记录到 `delete_notification` / `delete_notification_persist` 元数据中。
 
 ### 目录结构
 

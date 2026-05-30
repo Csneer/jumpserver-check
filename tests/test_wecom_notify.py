@@ -10,6 +10,7 @@ def isolate_dotenv(monkeypatch, tmp_path):
     monkeypatch.setattr(notify, "PROJECT_ROOT", tmp_path)
     monkeypatch.delenv("WECOM_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("WECOM_CHANNEL", raising=False)
+    monkeypatch.delenv("WECOM_DELETE_DETAIL_LIMIT", raising=False)
 
 def test_load_summary_prefers_inline_json_over_path_checks():
     payload = {
@@ -332,6 +333,75 @@ def test_build_cleanup_delete_message_groups_deleted_assets():
     assert "artifacts/cleanup/local/archive.json" in message
     assert "artifacts/cleanup/local/result.json" in message
     assert "asset-2" not in message
+
+
+def test_build_cleanup_delete_message_truncates_large_batches_to_default_limit():
+    attempts = [
+        {
+            "status": "deleted",
+            "asset_id": f"asset-{idx}",
+            "asset_name": f"host-{idx}",
+            "asset_ip": f"192.0.2.{idx}",
+            "operator": "admin",
+            "reason": "batch cleanup",
+            "delete_ack": f"DELETE asset-{idx}",
+            "api_status": 204,
+        }
+        for idx in range(1, 8)
+    ]
+    apply_result = {"profile": "prod", "result_path": "artifacts/cleanup/prod/result.json", "results": attempts}
+
+    message = notify.build_cleanup_delete_message(apply_result)
+
+    assert "**删除尝试**：7" in message
+    assert "**删除数量**：7" in message
+    assert "前 5 条" in message
+    assert "其余 2 条请查看清理结果 JSON" in message
+    assert "host-1" in message
+    assert "host-5" in message
+    assert "host-6" not in message
+    assert "DELETE asset-6" not in message
+    assert "artifacts/cleanup/prod/result.json" in message
+
+
+def test_build_cleanup_delete_message_honors_env_detail_limit(monkeypatch):
+    monkeypatch.setenv("WECOM_DELETE_DETAIL_LIMIT", "2")
+    attempts = [
+        {"status": "deleted", "asset_id": f"asset-{idx}", "asset_name": f"host-{idx}", "asset_ip": f"192.0.2.{idx}"}
+        for idx in range(1, 5)
+    ]
+
+    message = notify.build_cleanup_delete_message({"result_path": "result.json", "results": attempts})
+
+    assert "前 2 条" in message
+    assert "host-1" in message
+    assert "host-2" in message
+    assert "host-3" not in message
+    assert "其余 2 条" in message
+
+
+def test_send_cleanup_delete_notification_accepts_detail_limit(monkeypatch):
+    sent = {}
+    monkeypatch.setenv("WECOM_WEBHOOK_URL", "https://wecom.example/hook")
+    monkeypatch.setattr(notify, "send_wecom_message", lambda url, payload, timeout=10: sent.update({"payload": payload}) or {"ok": True})
+    apply_result = {
+        "results": [
+            {"status": "deleted", "asset_id": f"asset-{idx}", "asset_name": f"host-{idx}", "asset_ip": f"192.0.2.{idx}"}
+            for idx in range(1, 5)
+        ]
+    }
+
+    result = notify.send_cleanup_delete_notification(apply_result, detail_limit=2)
+
+    assert result["status"] == "sent"
+    assert result["detail_limit"] == 2
+    assert result["truncated_count"] == 2
+    content = sent["payload"]["markdown"]["content"]
+    assert "host-1" in content
+    assert "host-2" in content
+    assert "host-3" not in content
+    assert "其余 2 条" in content
+
 
 def test_delete_attempt_items_ignores_pre_delete_fetch_failure():
     assert notify.delete_attempt_items({"results": [{"action": "delete", "status": "asset_fetch_failed", "api_status": 500}]}) == []
