@@ -497,3 +497,14 @@ def test_cleanup_admin_html_has_first_class_ping_evidence_columns():
     assert "Ping 时间" in html
     assert "pingEvidence" in html
     assert "ip_reachability_checked_at" in html
+
+
+def test_cleanup_admin_html_has_first_class_tcp_evidence_columns():
+    html = admin.page_html()
+
+    assert "tcp_open_requires_review" in html
+    assert "SSH端口开放需复核" in html
+    assert "TCP 可达性" in html
+    assert "TCP 时间" in html
+    assert "tcpEvidence" in html
+    assert "tcp_reachability_checked_at" in html

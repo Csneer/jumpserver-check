@@ -9,14 +9,17 @@
 - 已实现 JumpServer AccessKey HMAC-SHA256 签名鉴权。
 - 已实现 `validate-auth`、`list-assets`、`detect` 三个探测 CLI 子命令。
 - 已实现 `run_weekly_check.py` 全流程编排：探测、语雀同步、企业微信通知。
+- 已实现周巡检稳定快照对比：每次仍保留本地 raw/latest/workflow 证据；主机信息无变化时跳过新的语雀时间戳归档，并在企业微信中提示“与上一轮结果对比无主机信息变动，已跳过语雀归档”。
 - 已支持分页拉取活跃资产、按关键字筛选资产、跳过 Windows 资产。
 - 已通过 JumpServer Ops 作业下发只读 Shell 探测命令；默认使用全量一次批量 job，payload 携带资产 ID 和节点 ID，对齐 Web 控制台链路。
 - 已在执行前读取当前账号授权资产，未授权资产不提交 Ops，报告中标记为 `permission_denied`。
+- 已支持部署机侧 IP ping 与可选 TCP/SSH 端口探测证据；TCP 开放但 JumpServer Ops 不可达会标记为 `jumpserver_unreachable_tcp_open`，仅进入人工复核，不会进入自动清理候选。
 - 已支持提取主机所有全局 IPv4 地址，并默认仅排除 Docker 默认 `172.17.*` 网桥地址，避免误过滤合法 `172.16.0.0/12` 内网主机 IP。
-- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`unreachable`、`api_error`、`log_fetch_error`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`ops_task_failed`、`permission_denied`、`no_account`、`parse_error`、`probe_script_error`、`skipped_non_linux`、`skipped_windows`。
+- 已解析 Ops 日志并分类输出 `ok_static`、`warn_dhcp`、`manual_check`、`ip_mismatch`、`duplicate_asset`、`jumpserver_unreachable_ip_reachable`、`jumpserver_unreachable_tcp_open`、`unreachable`、`api_error`、`log_fetch_error`、`probe_timeout`、`ops_no_output`、`ops_module_error`、`ops_task_failed`、`permission_denied`、`no_account`、`parse_error`、`probe_script_error`、`skipped_non_linux`、`skipped_windows`。
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
 - 已内置语雀 Markdown 同步和企业微信 Markdown 通知脚本，不依赖外部 `yuqeu_sync` 目录。
-- 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入等单元测试。
+- 已实现废弃主机确认/清理扩展：默认只读；真实 delete/delete_failed 尝试会发送企业微信管理操作通知并把通知结果写入 cleanup result/workflow 元数据。
+- 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入、周巡检快照、TCP 复核、清理门控、企业微信通知等单元测试。
 
 ## 配置
 
@@ -47,6 +50,14 @@ WECOM_CHANNEL=wecom
 CHECK_WAIT_TIMEOUT=1200
 CHECK_POLL_INTERVAL=30
 CHECK_OUTPUT_DIR=reports/yuque
+CHECK_IP_REACHABILITY=true
+CHECK_IP_PING_COUNT=1
+CHECK_IP_PING_TIMEOUT=1
+CHECK_IP_PING_WORKERS=32
+CHECK_TCP_REACHABILITY=false
+CHECK_TCP_REACHABILITY_PORTS=22
+CHECK_TCP_REACHABILITY_TIMEOUT=1
+CHECK_TCP_REACHABILITY_WORKERS=32
 ```
 
 `.env` 已被 `.gitignore` 忽略，不要提交 Access Key。
@@ -86,6 +97,7 @@ python scripts/run_multi_check.py --profiles prod,test,pre --parallel 3 --no-pro
 reports/yuque/<profile>/
 artifacts/raw/<profile>/
 artifacts/state/<profile>/jms-host-ip-check-inflight.json
+artifacts/state/<profile>/last-stable-host-snapshot.json
 artifacts/workflow/<profile>/
 ```
 
@@ -98,6 +110,37 @@ artifacts/workflow/<profile>/
 ```powershell
 python scripts/run_weekly_check.py --no-proxy
 ```
+
+正式周巡检建议显式标记来源，便于稳定快照对比和清理证据链使用：
+
+```powershell
+python scripts/run_weekly_check.py `
+  --profile prod `
+  --no-proxy `
+  --run-source weekly_scheduled `
+  --cleanup-evidence-eligible
+```
+
+`weekly_scheduled` 模式会维护 `artifacts/state/<profile>/last-stable-host-snapshot.json`：
+
+- 首次运行、快照缺失或主机信息变化：同步新的语雀时间戳归档，并更新稳定快照。
+- 主机信息无变化：跳过新的语雀时间戳归档，只更新本地 workflow/raw/latest 证据和快照检查时间；企业微信会附带“与上一轮结果对比无主机信息变动，已跳过语雀归档”。
+- 探测失败、raw JSON 缺失/损坏、或 raw 中没有带 `asset_id`/`asset_ip`/`asset_name` 的可用主机行：fail-closed，不会覆盖稳定快照。
+
+部署机侧 TCP/SSH 端口探测默认关闭；需要用 SSH 端口开放状态辅助复核时显式启用：
+
+```powershell
+python scripts/run_weekly_check.py `
+  --profile prod `
+  --no-proxy `
+  --run-source weekly_scheduled `
+  --tcp-reachability-check `
+  --tcp-reachability-ports 22 `
+  --tcp-reachability-timeout 1 `
+  --tcp-reachability-workers 32
+```
+
+TCP 探测使用 Python socket，不依赖 `nc` 或 shell 拼接。它只会在 JumpServer Ops 已判定 `unreachable` 且 ping 未可达时运行；如果 SSH/TCP 端口开放，状态会降级为“需复核”，不会加速清理。
 
 全量批量探测默认支持中断接续：创建 JumpServer Ops job 后会把 `task_id` 写入 `artifacts/state/jms-host-ip-check-inflight.json`。如果本地脚本中断但 JumpServer job 仍在或已完成，下次运行会优先接续该任务并解析日志，不会重复提交新 job。需要强制新建任务时使用：
 
@@ -240,6 +283,7 @@ artifacts/workflow/
   weekly-workflow-YYYYMMDD-HHMMSS.json
 artifacts/state/
   jms-host-ip-check-inflight.json
+  last-stable-host-snapshot.json
 ```
 
 非 default profile 会自动隔离到 `<profile>` 子目录，见上方“多环境配置”。
@@ -252,7 +296,16 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 # JumpServer 主机探测与 IP 配置检测报告
 ```
 
-报告包含 `问题分类索引`、`异常主机`、`全量明细` 三块内容。`问题分类索引` 会按 `warn_dhcp`、`ip_mismatch`、`duplicate_asset`、`unreachable` 等状态给出简短主机列表，便于先定位问题类型；重复资产会同时保留原始异常状态，因此分类数量可能存在有意重叠，完整字段和全部记录仍在后面的明细表中。
+报告包含 `问题分类索引`、`异常主机`、`全量明细` 三块内容。`问题分类索引` 会按 `warn_dhcp`、`ip_mismatch`、`duplicate_asset`、`jumpserver_unreachable_ip_reachable`、`jumpserver_unreachable_tcp_open`、`unreachable` 等状态给出简短主机列表，便于先定位问题类型；重复资产会同时保留原始异常状态，因此分类数量可能存在有意重叠，完整字段和全部记录仍在后面的明细表中。
+
+raw JSON 还会保留正交可达性字段：
+
+| 字段 | 说明 |
+|---|---|
+| `ops_connectivity` | JumpServer Ops 通道维度：`ok` / `unreachable` / `skipped` |
+| `ip_reachability` | 部署机 ping 维度：`reachable` / `unreachable` / `unknown` / `not_checked` |
+| `tcp_reachability` | 部署机 TCP 维度：`open` / `closed` / `unknown` / `not_checked` |
+| `ip_reachability_config` / `tcp_reachability_config` | 本次部署机侧探测配置 |
 
 ## 分类
 
@@ -261,6 +314,8 @@ Markdown 报告不包含 YAML front matter，首行固定为：
 - `manual_check`：连通，但无法自动判断 IP 类型，或未采集到可比对的主机 IP。
 - `ip_mismatch`：实际 IP 与 JumpServer 资产 IP 不一致。
 - `duplicate_asset`：JumpServer 存在多条相同资产 IP 记录，优先作为历史遗留或重复录入问题标注；原始探测状态仍会保留并参与异常分类汇总。
+- `jumpserver_unreachable_ip_reachable`：JumpServer Ops 不可达，但部署机侧 ping 可达；需要人工复核，不进入清理候选。
+- `jumpserver_unreachable_tcp_open`：JumpServer Ops 不可达且 ping 未可达，但部署机侧 TCP/SSH 端口开放；需要人工复核，不进入清理候选。
 - `unreachable`：Ops 返回连接失败或无主机输出。
 - `api_error`：JumpServer API 或 Ops job 创建/状态查询异常。
 - `log_fetch_error`：Ops 任务结束后日志接口失败或分页中断。
@@ -446,6 +501,8 @@ python3 scripts/run_weekly_check.py \
 - 确认记录中包含 `delete_ack` 字段
 - 计划动作与确认动作一致
 
+真实 DELETE API 尝试（包括 `deleted` 和 `delete_failed`）会触发企业微信“主机清理删除操作”通知。通知会汇总本次 apply 中的删除成功数、删除失败数，并列出 profile、资产 ID/名称/IP、操作人、原因、`delete_ack`、存档路径、结果路径和 HTTP 状态。通知发送失败或通知结果回写失败不会掩盖清理结果，会记录到 `delete_notification` / `delete_notification_persist` 元数据中。
+
 ### 目录结构
 
 清理相关的文件按 profile 隔离：
@@ -459,6 +516,7 @@ artifacts/
     cleanup_protected_hosts.json                     # 被保护的主机（不清理）
     cleanup_review_hosts.json                        # 需复查的主机
     jms-host-ip-check-inflight.json                  # Ops 任务接续状态
+    last-stable-host-snapshot.json                    # 周巡检稳定主机快照
   cleanup/<profile>/
     cleanup-plan-YYYYMMDD-HHMMSS.json                # 清理候选计划
     cleanup-result-YYYYMMDD-HHMMSS.json              # 清理执行结果

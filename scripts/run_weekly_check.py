@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -97,6 +98,13 @@ def run_detect_subprocess(args: argparse.Namespace, timeout_seconds: int) -> dic
     command.extend(["--ip-ping-count", str(getattr(args, "ip_ping_count", 1))])
     command.extend(["--ip-ping-timeout", str(getattr(args, "ip_ping_timeout", 1))])
     command.extend(["--ip-ping-workers", str(getattr(args, "ip_ping_workers", 32))])
+    if getattr(args, "tcp_reachability_check", False):
+        command.append("--tcp-reachability-check")
+    else:
+        command.append("--no-tcp-reachability-check")
+    command.extend(["--tcp-reachability-ports", str(getattr(args, "tcp_reachability_ports", "22"))])
+    command.extend(["--tcp-reachability-timeout", str(getattr(args, "tcp_reachability_timeout", 1))])
+    command.extend(["--tcp-reachability-workers", str(getattr(args, "tcp_reachability_workers", 32))])
     if args.no_resume:
         command.append("--no-resume")
     if args.query:
@@ -146,6 +154,138 @@ def write_workflow_record(record: dict[str, Any], output_dir: Path) -> Path:
     return path
 
 
+HOST_SNAPSHOT_FIELDS = (
+    "asset_id",
+    "asset_name",
+    "asset_ip",
+    "actual_ips",
+    "ip_match",
+    "ip_type",
+    "ops_connectivity",
+    "ip_reachability",
+    "tcp_reachability",
+    "probe_status",
+    "original_probe_status",
+    "node",
+    "remark",
+)
+UNCHANGED_YUQUE_NOTE = "与上一轮结果对比无主机信息变动，已跳过语雀归档"
+
+
+def stable_snapshot_path(profile: str) -> Path:
+    return PROJECT_ROOT / profile_env.profile_path("artifacts/state", profile) / "last-stable-host-snapshot.json"
+
+
+def normalize_host_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {field: result.get(field) for field in HOST_SNAPSHOT_FIELDS if result.get(field) not in (None, "")}
+
+
+def has_host_identity(result: dict[str, Any]) -> bool:
+    return any(str(result.get(field) or "").strip() for field in ("asset_id", "asset_ip", "asset_name"))
+
+
+def normalized_host_results(detect_result: dict[str, Any]) -> list[dict[str, Any]]:
+    items = [item for item in detect_result.get("results") or [] if isinstance(item, dict) and has_host_identity(item)]
+    normalized = [normalize_host_result(item) for item in items]
+    return sorted(normalized, key=lambda item: (str(item.get("asset_id") or ""), str(item.get("asset_ip") or ""), str(item.get("asset_name") or "")))
+
+
+def has_host_results(payload: dict[str, Any]) -> bool:
+    results = payload.get("results")
+    return isinstance(results, list) and any(isinstance(item, dict) and has_host_identity(item) for item in results)
+
+
+def detect_result_with_raw_results(detect_result: dict[str, Any], *, require_results: bool = False) -> dict[str, Any]:
+    if isinstance(detect_result.get("results"), list):
+        if require_results and not has_host_results(detect_result):
+            raise RuntimeError("weekly stable snapshot requires raw host results: inline results does not contain any host result objects")
+        return detect_result
+    raw_path = str((detect_result.get("paths") or {}).get("raw") or "")
+    if not raw_path:
+        if require_results:
+            raise RuntimeError("weekly stable snapshot requires raw host results: detect result omitted inline results and paths.raw is empty")
+        return detect_result
+    try:
+        raw_payload = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        if require_results:
+            raise RuntimeError(f"weekly stable snapshot requires raw host results: cannot read paths.raw {raw_path}: {exc}") from exc
+        return detect_result
+    except json.JSONDecodeError as exc:
+        if require_results:
+            raise RuntimeError(f"weekly stable snapshot requires raw host results: paths.raw {raw_path} is invalid JSON: {exc}") from exc
+        return detect_result
+    if isinstance(raw_payload, dict) and isinstance(raw_payload.get("results"), list):
+        if require_results and not has_host_results(raw_payload):
+            raise RuntimeError(f"weekly stable snapshot requires raw host results: paths.raw {raw_path} does not contain any host result objects")
+        merged = dict(detect_result)
+        merged["results"] = raw_payload["results"]
+        return merged
+    if require_results:
+        raise RuntimeError(f"weekly stable snapshot requires raw host results: paths.raw {raw_path} does not contain a results list")
+    return detect_result
+
+
+def host_hash(hosts: list[dict[str, Any]]) -> str:
+    raw = json.dumps(hosts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_host_snapshot(profile: str, detect_result: dict[str, Any], *, run_id: str = "", recovery_reason: str = "") -> dict[str, Any]:
+    hosts = normalized_host_results(detect_result)
+    snapshot = {
+        "profile": profile,
+        "host_hash": host_hash(hosts),
+        "hosts": hosts,
+        "last_run_id": run_id or str(detect_result.get("run_id") or ""),
+        "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    if recovery_reason:
+        snapshot["recovery_reason"] = recovery_reason
+    return snapshot
+
+
+def load_host_snapshot(path: Path) -> tuple[dict[str, Any] | None, str]:
+    if not path.exists():
+        return None, "missing_snapshot"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "corrupt_snapshot"
+    return (payload if isinstance(payload, dict) else None), "loaded"
+
+
+def compare_host_snapshot(previous: dict[str, Any] | None, current: dict[str, Any], *, recovery_reason: str = "") -> dict[str, Any]:
+    current_hosts = current.get("hosts") if isinstance(current.get("hosts"), list) else []
+    previous_hosts = previous.get("hosts") if isinstance(previous, dict) and isinstance(previous.get("hosts"), list) else []
+    previous_by_id = {str(item.get("asset_id") or item.get("asset_ip") or item.get("asset_name")): item for item in previous_hosts if isinstance(item, dict)}
+    current_by_id = {str(item.get("asset_id") or item.get("asset_ip") or item.get("asset_name")): item for item in current_hosts if isinstance(item, dict)}
+    added_keys = set(current_by_id) - set(previous_by_id)
+    removed_keys = set(previous_by_id) - set(current_by_id)
+    changed_keys = {key for key in set(current_by_id) & set(previous_by_id) if current_by_id[key] != previous_by_id[key]}
+    changed = previous is None or previous.get("host_hash") != current.get("host_hash")
+    diff = {
+        "changed": changed,
+        "host_hash": current.get("host_hash"),
+        "previous_host_hash": previous.get("host_hash") if isinstance(previous, dict) else "",
+        "added": len(added_keys) if previous is not None else len(current_by_id),
+        "removed": len(removed_keys),
+        "status_changed": len(changed_keys),
+    }
+    if not changed:
+        diff["note"] = UNCHANGED_YUQUE_NOTE
+    if recovery_reason and recovery_reason != "loaded":
+        diff["recovery_reason"] = recovery_reason
+    return diff
+
+
+def update_snapshot_metadata(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(previous)
+    updated["last_checked_at"] = current.get("last_checked_at")
+    updated["last_run_id"] = current.get("last_run_id")
+    return updated
+
+
 def build_notify_summary(detect_result: dict[str, Any] | None) -> dict[str, Any]:
     if not detect_result:
         return {}
@@ -185,6 +325,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     yuque_result: dict[str, Any] | None = None
     notify_result: dict[str, Any] | None = None
     cleanup_result: dict[str, Any] | None = None
+    host_snapshot_diff: dict[str, Any] | None = None
     status = "success"
     error_message = ""
     report_path = ""
@@ -200,26 +341,34 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         report_path = str(paths.get("latest") or paths.get("report") or "")
         if not report_path:
             raise RuntimeError("探测完成但未返回报告路径")
-        if args.dry_run_yuque:
-            yuque_result = yuque_markdown_sync.sync_markdown(
-                Path(report_path),
-                title=args.yuque_title,
-                slug=args.yuque_slug,
-                toc_uuid=args.toc_uuid,
-                sibling_url=args.sibling_url,
-                audit_timestamp=True,
-                dry_run=True,
-            )
+        use_stable_snapshot_diff = getattr(args, "run_source", "manual") == "weekly_scheduled"
+        if use_stable_snapshot_diff:
+            snapshot_source = detect_result_with_raw_results(detect_result, require_results=True)
+            current_snapshot = build_host_snapshot(args.profile, snapshot_source, run_id=str(detect_result.get("run_id") or args.run_id))
+            snapshot_path = stable_snapshot_path(args.profile)
+            previous_snapshot, snapshot_state = load_host_snapshot(snapshot_path)
+            host_snapshot_diff = compare_host_snapshot(previous_snapshot, current_snapshot, recovery_reason=snapshot_state)
+        if not use_stable_snapshot_diff or (host_snapshot_diff and host_snapshot_diff.get("changed")):
+            try:
+                yuque_result = yuque_markdown_sync.sync_markdown(
+                    Path(report_path),
+                    title=args.yuque_title,
+                    slug=args.yuque_slug,
+                    toc_uuid=args.toc_uuid,
+                    sibling_url=args.sibling_url,
+                    audit_timestamp=True,
+                    dry_run=bool(args.dry_run_yuque),
+                )
+            except Exception as exc:
+                if not use_stable_snapshot_diff:
+                    raise
+                yuque_result = {"status": "failed", "error": str(exc)}
+            if use_stable_snapshot_diff:
+                host_cleanup.atomic_write_json(snapshot_path, current_snapshot)
         else:
-            yuque_result = yuque_markdown_sync.sync_markdown(
-                Path(report_path),
-                title=args.yuque_title,
-                slug=args.yuque_slug,
-                toc_uuid=args.toc_uuid,
-                sibling_url=args.sibling_url,
-                audit_timestamp=True,
-                dry_run=False,
-            )
+            yuque_result = {"status": "skipped", "reason": "unchanged_host_snapshot", "note": UNCHANGED_YUQUE_NOTE}
+            if previous_snapshot is not None:
+                host_cleanup.atomic_write_json(snapshot_path, update_snapshot_metadata(previous_snapshot, current_snapshot))
         yuque_url = str((yuque_result or {}).get("url") or "")
         cleanup_result = run_cleanup_steps(args, detect_result)
     except TimeoutError as exc:
@@ -234,8 +383,13 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
 
     duration = time.time() - started
     notify_summary = build_notify_summary(detect_result)
+    if host_snapshot_diff:
+        notify_summary["host_snapshot_diff"] = host_snapshot_diff
     if cleanup_result and cleanup_result.get("status") != "skipped":
         notify_summary["cleanup"] = cleanup_result
+    apply_result = cleanup_result.get("apply") if isinstance(cleanup_result, dict) and isinstance(cleanup_result.get("apply"), dict) else {}
+    if apply_result:
+        host_cleanup.notify_cleanup_delete_result(apply_result)
     try:
         notify_result = wecom_notify.notify(
             status=status,
@@ -262,6 +416,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "duration_seconds": duration,
         "error_message": error_message,
         "detect": detect_result,
+        "host_snapshot_diff": host_snapshot_diff,
         "yuque": yuque_result,
         "wecom": notify_result,
         "cleanup": cleanup_result,
@@ -303,6 +458,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ip-ping-count", type=int, default=env_int("CHECK_IP_PING_COUNT", 1))
     parser.add_argument("--ip-ping-timeout", type=int, default=env_int("CHECK_IP_PING_TIMEOUT", 1))
     parser.add_argument("--ip-ping-workers", type=int, default=env_int("CHECK_IP_PING_WORKERS", 32))
+    parser.add_argument("--tcp-reachability-check", action=argparse.BooleanOptionalAction, default=(os.getenv("CHECK_TCP_REACHABILITY", "false").lower() in {"1", "true", "yes"}))
+    parser.add_argument("--tcp-reachability-ports", default=os.getenv("CHECK_TCP_REACHABILITY_PORTS", "22"))
+    parser.add_argument("--tcp-reachability-timeout", type=int, default=env_int("CHECK_TCP_REACHABILITY_TIMEOUT", 1))
+    parser.add_argument("--tcp-reachability-workers", type=int, default=env_int("CHECK_TCP_REACHABILITY_WORKERS", 32))
     parser.add_argument("--query", default="")
     parser.add_argument("--max-assets", type=int)
     parser.add_argument("--yuque-title", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_TITLE", DEFAULT_TITLE))

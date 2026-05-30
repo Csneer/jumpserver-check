@@ -41,3 +41,41 @@ def test_sop_documents_ping_flags_and_raw_reachability_contract():
         "ip_reachability_config",
     ):
         assert text in sop
+
+
+def test_sop_documents_diff_archive_wecom_delete_and_tcp_reachability_policy():
+    sop = Path("SOP_JumpServer主机探测与IP配置检测.md").read_text(encoding="utf-8")
+
+    required = [
+        "对比上一轮稳定结果",
+        "无主机信息变动",
+        "已跳过语雀归档",
+        "差异化通知",
+        "真实删除动作必须推送企业微信管理操作通知",
+        "delete_ack",
+        "--tcp-reachability-check",
+        "--tcp-reachability-ports 22",
+        "tcp_reachability",
+        "tcp_reachability_config",
+        "jumpserver_unreachable_tcp_open",
+        "部署机 TCP/SSH 端口开放，必须人工复核",
+        "| unreachable | unknown/unreachable/not_checked | open | `jumpserver_unreachable_tcp_open`",
+        "不得 shell 拼接",
+        "官方资产探测 API",
+        "/api/docs/",
+        "artifacts/state/<profile>/last-stable-host-snapshot.json",
+        "不得无条件为每次成功巡检创建新的语雀时间戳文档",
+        "快照缺失或 JSON 损坏",
+        "jumpserver_unreachable_ip_reachable  >  jumpserver_unreachable_tcp_open",
+        "result_path",
+        "workflow/apply 元数据",
+    ]
+    for text in required:
+        assert text in sop
+
+
+def test_sop_rejects_unconditional_weekly_yuque_archive_wording():
+    sop = Path("SOP_JumpServer主机探测与IP配置检测.md").read_text(encoding="utf-8")
+
+    assert "这样每周定时任务都会创建或更新独立的时间戳文档" not in sop
+    assert "只有当本轮主机信息相对上一轮稳定快照发生变化" in sop

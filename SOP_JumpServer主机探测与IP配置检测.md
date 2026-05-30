@@ -45,7 +45,7 @@
 | 排除主机 | OS 类型为 Windows、非 Linux 或未知平台的资产（在报告中单独列出，不做探测） |
 | 触发方式 | 定时执行（建议每周一次）或运维手动触发 |
 | 所需权限 | JumpServer API Key（需有资产读权限 + Ops 执行权限） |
-| 报告流向 | 本地 `reports/yuque/` + 语雀时间戳文档 + 企业微信摘要 |
+| 报告流向 | 本地 `reports/yuque/` + 语雀变更归档文档 + 企业微信差异化摘要 |
 | 清理模式 | 默认只读；废弃主机清理仅在显式确认后进入自动执行 |
 
 ### 1.3.1 设计原则
@@ -73,8 +73,9 @@
   -> 分页获取完整执行日志
   -> 解析并分类
   -> 生成 Markdown / JSON 报告
-  -> 同步语雀文档
-  -> 推送企业微信执行摘要
+  -> 对比上一轮稳定结果
+  -> 仅有主机信息变化时同步语雀归档文档
+  -> 推送企业微信差异化执行摘要
 ```
 
 ---
@@ -143,7 +144,7 @@ SUCCESS → 按主机解析输出
 不可达 / 异常主机 → 进入报告与通知
     │
     ▼
-汇总所有结果 → 生成报告 → 同步语雀 → 企业微信通知
+汇总所有结果 → 生成报告 → 对比上一轮稳定结果 → 必要时同步语雀 → 企业微信差异化通知
 ```
 
 ---
@@ -498,13 +499,15 @@ python3 scripts/run_weekly_check.py \
   --cleanup-evaluate
 ```
 
-`run_weekly_check.py` 最终会本地启动：
+当前 `run_weekly_check.py` 会本地启动 detect，并已透传 IP ping 与 TCP/SSH 可达性参数；TCP/SSH 端口探测默认关闭，只有配置 `CHECK_TCP_REACHABILITY=true` 或显式传入 `--tcp-reachability-check` 时启用：
 
 ```bash
-python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible] --ip-reachability-check --ip-ping-count <n> --ip-ping-timeout <seconds> --ip-ping-workers <workers>
+python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible] --ip-reachability-check --ip-ping-count <n> --ip-ping-timeout <seconds> --ip-ping-workers <workers> [--tcp-reachability-check --tcp-reachability-ports 22 --tcp-reachability-timeout <seconds> --tcp-reachability-workers <workers>]
 ```
 
 周巡检默认开启部署机侧 IP 可达性证据：`--ip-reachability-check`。`--ip-ping-count` 默认 1，`--ip-ping-timeout` 默认 1 秒，`--ip-ping-workers` 默认 32 且 detect 侧上限 64，避免误配置造成过量并发。手工 detect 默认不启用 ping，可通过 `CHECK_IP_REACHABILITY=true` 或显式 CLI 参数启用。
+
+部署机侧 TCP/SSH 端口证据通过 `--tcp-reachability-check`、`--tcp-reachability-ports 22`、`--tcp-reachability-timeout`、`--tcp-reachability-workers` 配置，默认端口为 22。当前实现优先使用 Python socket 连接探测；如未来改用 `nc`，必须通过 argv 列表执行（例如 `["nc", "-z", "-w", "1", asset_ip, "22"]`），不得 shell 拼接。TCP 证据与 ping 一样只作为正交降级证据，不得加速清理。
 
 ## 7. 阶段四：下发 Ops 任务并轮询结果
 
@@ -642,6 +645,8 @@ IP_TYPE=unknown  → 归类为 manual_check（人工核查）
 | `manual_check` | 连通，但无法自动判断 IP 类型，或缺少可比对主机 IP |
 | `ip_mismatch` | 实际 IP 与 JumpServer 记录不一致 |
 | `unreachable` | SSH 连接失败，主机不可达 |
+| `jumpserver_unreachable_ip_reachable` | JumpServer/Ops 通道不可达，但部署机 ping 可达；必须人工复核，不进入自动清理候选 |
+| `jumpserver_unreachable_tcp_open` | JumpServer/Ops 通道不可达且 ping 未可达，但部署机 TCP/SSH 端口开放；必须人工复核，不进入自动清理候选 |
 | `probe_timeout` | 任务超时，未能探测 |
 | `ops_no_output` | Ops 任务成功但没有返回主机输出 |
 | `ops_module_error` | Ops/Ansible 模块执行异常 |
@@ -736,14 +741,19 @@ artifacts/state/jms-host-ip-check-inflight.json
 | `ip_reachability_exit_code` | ping 退出码；unknown/not_checked 时可为空 |
 | `ip_reachability_duration_ms` | ping 耗时毫秒；unknown/not_checked 时可为空 |
 | `ip_reachability_remark` | IP 可达性说明，例如 ping reachable / timeout / command missing |
-| `probe_status` | ok_static / warn_dhcp / unreachable / jumpserver_unreachable_ip_reachable / probe_timeout 等 |
+| `tcp_reachability` | 部署机到资产端口的 TCP 证据：open / closed / unknown / not_checked |
+| `tcp_reachability_source` | TCP 证据来源，建议为 deployment_host_socket 或 deployment_host_nc |
+| `tcp_reachability_ports` | 已探测端口列表，默认至少包含 SSH 端口 22 |
+| `tcp_reachability_checked_at` | 部署机侧 TCP 检查时间 |
+| `tcp_reachability_remark` | TCP 可达性说明，例如 ssh port open / timeout / command missing |
+| `probe_status` | ok_static / warn_dhcp / unreachable / jumpserver_unreachable_ip_reachable / jumpserver_unreachable_tcp_open / probe_timeout 等 |
 | `probe_source` | batch / skipped |
 | `original_probe_status` | 重复资产覆盖主状态时保留原始探测状态 |
 | `original_remark` | 重复资产覆盖主状态时保留原始备注 |
 | `node` | 所属节点/分组 |
 | `remark` | 备注（如：重复资产、任务失败、日志异常原因） |
 
-Raw JSON 顶层还会保留 `command_sha256`、`task_id`/`ops_task_ids`、`run_source`、`cleanup_evidence_eligible`、`ip_reachability_enabled` 与 `ip_reachability_config`。其中 `ops_task_ids` 汇总本轮 batch Ops task id，`ip_reachability_config` 记录 count、timeout、workers 的实际配置。
+Raw JSON 顶层还会保留 `command_sha256`、`task_id`/`ops_task_ids`、`run_source`、`cleanup_evidence_eligible`、`ip_reachability_enabled`、`ip_reachability_config`、`tcp_reachability_enabled` 与 `tcp_reachability_config`。其中 `ops_task_ids` 汇总本轮 batch Ops task id，`ip_reachability_config` 记录 count、timeout、workers 的实际配置，`tcp_reachability_config` 记录 ports、timeout、workers 的实际配置。
 
 Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主机列表；随后输出 `异常主机` 完整表和 `全量明细`。问题分类索引用于快速定位某类问题，完整排查仍以异常主机表和全量明细为准。
 
@@ -769,9 +779,9 @@ Markdown 报告先输出 `问题分类索引`，按异常分类列出简短主�
 - 建议保留最近 12 次报告（约 3 个月，按每周执行计）。
 - 超过保留期的历史报告自动归档或删除。
 
-### 10.4 语雀同步
+### 10.4 语雀同步与稳定快照差异归档
 
-语雀同步使用项目内置脚本：
+语雀同步使用项目内置脚本；只有当本轮主机信息相对上一轮稳定快照发生变化，或当前 profile 尚无稳定快照基线时，定时任务才创建新的时间戳归档文档：
 
 ```bash
 python scripts/yuque_markdown_sync.py reports/yuque/jumpserver-host-ip-check-latest.md \
@@ -787,9 +797,20 @@ JumpServer 主机探测与 IP 配置检测报告 2026-05-21 18:47:45
 jumpserver-host-ip-check-20260521-184745
 ```
 
-这样每周定时任务都会创建或更新独立的时间戳文档，不覆盖历史审计记录。
+定时任务不得无条件为每次成功巡检创建新的语雀时间戳文档。实施时应维护 profile 级稳定快照文件：`artifacts/state/<profile>/last-stable-host-snapshot.json`。
 
-如果配置了 `YUQUE_SIBLING_URL`，脚本会自动读取该文档所在目录，并把新报告挂载到它的同级目录中。也可以直接配置 `YUQUE_TARGET_TOC_UUID` 固定目录 UUID。
+稳定快照语义：
+
+- **可成为稳定快照的运行**：preflight 成功、detect 成功、成功生成本地 raw/latest Markdown/workflow record 的定时巡检；Yuque 同步成功不是成为稳定快照的必要条件，否则语雀故障会阻断后续差异判断。
+- **首次运行**：没有稳定快照时视为 baseline changed，正常创建语雀归档并写入稳定快照。
+- **比较字段**：归一化每台主机的 `asset_id`、`asset_name`、`asset_ip`、`actual_ips`、`ip_match`、`ip_type`、`ops_connectivity`、`ip_reachability`、`tcp_reachability`、`probe_status`、`original_probe_status`、`node` 与关键 `remark`。
+- **忽略字段**：`run_id`、时间戳、raw/report/语雀路径、耗时、task_id、批次顺序等运行元数据。
+- **无变化运行**：本地 raw/latest/workflow record 仍保留；不创建新的语雀时间戳归档；企业微信备注“与上一轮结果对比无主机信息变动，已跳过语雀归档”；稳定快照保留原 `host_hash`，只允许更新 `last_checked_at`、`last_run_id` 等元数据。
+- **有变化运行**：创建语雀归档；企业微信展示新增/消失/状态变化数量；成功写入新的稳定快照。
+- **失败/超时/配置错误**：不得标记为 unchanged，不得覆盖稳定快照，按失败通知处理。
+- **写入要求**：稳定快照必须原子写入；快照缺失或 JSON 损坏时按“无可信基线”处理，重新创建语雀归档并写入新 baseline，同时在 workflow record 中记录恢复原因。
+
+如果配置了 `YUQUE_SIBLING_URL`，脚本会自动读取该文档所在目录，并把有变化的新报告挂载到它的同级目录中。也可以直接配置 `YUQUE_TARGET_TOC_UUID` 固定目录 UUID。
 
 ### 10.5 企业微信通知
 
@@ -799,7 +820,15 @@ jumpserver-host-ip-check-20260521-184745
 python scripts/wecom_notify.py --status success --title "JumpServer 每周主机巡检"
 ```
 
-通知包含执行状态、耗时、关键分类数量、语雀链接和本地报告路径。`WECOM_WEBHOOK_URL` 未配置时通知跳过，不影响探测和语雀同步；配置后推送失败会写入工作流记录。
+通知包含执行状态、耗时、关键分类数量、差异摘要、语雀链接和本地报告路径。`WECOM_WEBHOOK_URL` 未配置时通知跳过，不影响探测和语雀同步；配置后推送失败会写入工作流记录。
+
+通知口径：
+
+- `JumpServer不可达但IP可达`、`JumpServer不可达但SSH端口开放` 必须与普通 `不可达` 分开显示，归入“需人工复核”；
+- cleanup 计划摘要必须显示“候选 / 需人工复核 / 跳过”，真实 apply 结果必须显示禁用、删除、跳过、失败数量；
+- 对真实删除动作必须推送企业微信管理操作通知，内容至少包含 profile、asset_id、asset_name、asset_ip、operator、reason、delete_ack、archive_path 或 result_path；
+- 若本轮与上一轮无主机信息变动，通知必须明确写出“与上一轮结果对比无主机信息变动，已跳过语雀归档”；
+- 若发生主机变化，通知必须概括新增/消失/状态变化数量。
 
 ### 10.6 定时任务
 
@@ -847,14 +876,16 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 - `parse_error`
 - `ops_task_failed` 但缺少主机级不可达证据
 - `jumpserver_unreachable_ip_reachable`（JumpServer 通道不可达但 IP 可达，必须人工复核）
+- `jumpserver_unreachable_tcp_open`（JumpServer 通道不可达但部署机 TCP/SSH 端口开放，必须人工复核）
 
 证据矩阵补充：
 
-| Ops 结果 | 部署机 ping 结果 | 展示状态 | 是否进入自动清理候选 |
-|---|---|---|---|
-| unreachable | reachable | `jumpserver_unreachable_ip_reachable` / 需人工复核 | 否 |
-| unreachable | unreachable | `unreachable` | 可继续作为证据，但仍需全部门控 |
-| unreachable | unknown | `unreachable` + ping 备注 | 保守，不增强证据 |
+| Ops 结果 | 部署机 ping 结果 | 部署机 TCP/SSH 结果 | 展示状态 | 是否进入自动清理候选 |
+|---|---|---|---|---|
+| unreachable | reachable | 任意 | `jumpserver_unreachable_ip_reachable` / 需人工复核 | 否 |
+| unreachable | unknown/unreachable/not_checked | open | `jumpserver_unreachable_tcp_open` / 需人工复核 | 否 |
+| unreachable | unreachable | closed/unknown/not_checked | `unreachable` | 可继续作为证据，但仍需全部门控 |
+| unreachable | unknown/not_checked | closed/unknown/not_checked | `unreachable` + ping/TCP 备注 | 保守，不增强证据 |
 
 #### 10.7.3 前端页面的数据展示
 
@@ -929,11 +960,14 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 企业微信或报告摘要中应明确输出：
 
 - 本轮发现的废弃候选数量
-- 已确认待清理数量
+- 已确认待清理数量，以及需人工复核数量（含 IP 可达、TCP/SSH 开放）
 - 已存档数量
-- 已清理数量
+- 已禁用数量
+- 已删除数量（真实 delete 必须单独列出）
 - 被保护或跳过的原因
 - 存档路径
+
+真实 `delete` 的 apply result 必须携带或可直接关联 `profile`、`asset_id`、`asset_name`、`asset_ip`、`operator`、`reason`、`delete_ack`、`archive_path` 与 `result_path`。企业微信 delete 通知失败不得掩盖 delete 执行结果，但必须写入 workflow/apply 元数据供审计。
 
 这样可以确保“确认过什么、何时清理、为什么清理、清理前看到了什么证据”都能回溯。
 
@@ -983,6 +1017,8 @@ python scripts/wecom_notify.py --status success --title "JumpServer 每周主机
 | 废弃主机清理 | 确认清单缺失 / 保护清单命中 | 跳过清理，仅保留异常报告 |
 | 废弃主机清理 | 存档失败 | 终止清理，不可直接删除 |
 | 废弃主机清理 | JumpServer 返回失败 | 记录清理失败，保留 archive 与计划记录 |
+| 定时任务差异比较 | 与上一轮无主机信息变动 | 跳过新语雀归档，企业微信备注无主机信息变动 |
+| TCP/SSH 探测 | nc/socket 超时、命令缺失或权限错误 | 记录 `tcp_reachability=unknown`，不得作为清理增强证据 |
 
 `run_weekly_check.py` 会在下发 JumpServer Ops 前自动执行 preflight。若配置缺失或仍是占位值，流程会直接失败并尝试推送失败通知，不会创建 Ops job。
 
@@ -1091,7 +1127,7 @@ function detect_ip_type():
 当同一主机触发多个分类时，按以下优先级取最高级显示：
 
 ```
-duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  unreachable  >  probe_timeout  >  ip_mismatch  >  warn_dhcp  >  manual_check  >  ok_static
+duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  jumpserver_unreachable_ip_reachable  >  jumpserver_unreachable_tcp_open  >  unreachable  >  probe_timeout  >  ip_mismatch  >  warn_dhcp  >  manual_check  >  ok_static
 ```
 
 ### 附录 D：与现有项目复用建议
@@ -1133,6 +1169,15 @@ duplicate_asset  >  ops_task_failed  >  log_fetch_error  >  unreachable  >  prob
 页面只更新这些 profile-scoped 状态清单，不直接触发删除/禁用。定时任务在读取清单后，会重新结合最近两次 eligible scheduled raw 证据做最终清理判定；确认后未经历下一次正式巡检时必须跳过。
 
 
-### 后续增强：官方资产探测 API 与 TCP 端口证据
+### 官方资产探测 API 与 TCP/SSH 端口证据
 
-JumpServer 管理页面可配置“启用资产探测 / 资产探测方式”。若要把这一路官方探测结果纳入本项目，应优先从当前 JumpServer 实例的 `/api/docs/` Swagger 确认对应 API、权限与返回 schema，再新增独立字段，例如 `jumpserver_probe_status`。部署机侧 `nc`/TCP 端口探测也可以作为补充证据，但应独立命名为 `tcp_reachability` 或 `service_reachability`，默认关闭或仅对 Ops unreachable 且 ping unknown/unreachable 的资产运行；它只能降低误清理风险或提示人工复核，不得绕过两次定时巡检、管理员确认、确认后下一次巡检和保护清单门控。
+JumpServer 管理页面可配置“启用资产探测 / 资产探测方式”。实施前应优先从当前 JumpServer 实例的 `/api/docs/` Swagger 确认是否存在可复用的官方资产探测 API、所需权限与返回 schema。若接入官方探测，必须使用独立字段，例如 `jumpserver_probe_status`，不得覆盖 `ops_connectivity`、`ip_reachability` 或 `tcp_reachability`。
+
+部署机侧 `nc`/TCP 端口探测作为当前计划中的补充证据，统一命名为 `tcp_reachability`：
+
+- 默认探测 SSH 端口 22，后续可允许 profile 配置端口列表；
+- 推荐优先使用 Python socket；如调用 `nc`，必须通过 argv 列表执行且校验 IP/端口，不得 shell 拼接；
+- 仅对 Ops unreachable 且 ping 未 reachable 的资产运行，降低网络噪音；
+- `tcp_reachability=open` 表示部署机能连通目标端口，资产不得进入自动清理候选，应进入人工复核并保留 raw/archive 证据；
+- `tcp_reachability=closed/unknown` 不能增强清理权限，只能作为备注；
+- 任何 TCP/native-probe 证据都不得绕过两次定时巡检、管理员确认、确认后下一次巡检、保护清单、存档成功和 apply 前重新 evaluate。

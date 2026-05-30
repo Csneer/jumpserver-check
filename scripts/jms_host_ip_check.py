@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import email.utils
 import hashlib
@@ -709,6 +710,68 @@ def check_ip_reachability(asset_ip: str, *, count: int, timeout: int) -> dict[st
     return base
 
 
+def parse_tcp_ports(value: Any) -> list[int]:
+    if isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        raw_items = str(value or "").split(",")
+    ports: list[int] = []
+    for raw in raw_items:
+        try:
+            port = int(str(raw).strip())
+        except ValueError:
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def bounded_tcp_workers(value: int) -> int:
+    return max(1, min(int(value or 1), 64))
+
+
+def check_tcp_reachability(asset_ip: str, *, ports: list[int], timeout: int) -> dict[str, Any]:
+    checked_at = dt.datetime.now().astimezone().isoformat()
+    valid_ports = parse_tcp_ports(ports)
+    base = {
+        "tcp_reachability": "unknown",
+        "tcp_reachability_source": "deployment_host_socket",
+        "tcp_reachability_ports": valid_ports,
+        "tcp_reachability_checked_at": checked_at,
+        "tcp_reachability_duration_ms": "",
+        "tcp_reachability_remark": "",
+    }
+    try:
+        ipaddress.ip_address((asset_ip or "").strip())
+    except ValueError:
+        base["tcp_reachability_remark"] = "invalid asset ip"
+        return base
+    if not valid_ports:
+        base["tcp_reachability_remark"] = "invalid tcp port"
+        return base
+    started = time.time()
+    saw_closed = False
+    for port in valid_ports:
+        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            sock.settimeout(max(timeout, 1))
+            try:
+                code = sock.connect_ex((asset_ip.strip(), port))
+            except OSError as exc:
+                base["tcp_reachability_remark"] = f"tcp check error: {exc}"
+                continue
+        if code == 0:
+            base["tcp_reachability"] = "open"
+            base["tcp_reachability_duration_ms"] = int((time.time() - started) * 1000)
+            base["tcp_reachability_remark"] = "ssh port open from deployment host" if port == 22 else f"tcp port {port} open from deployment host"
+            return base
+        saw_closed = True
+    base["tcp_reachability_duration_ms"] = int((time.time() - started) * 1000)
+    if saw_closed:
+        base["tcp_reachability"] = "closed"
+        base["tcp_reachability_remark"] = "tcp ports closed from deployment host"
+    return base
+
+
 def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreachable", remark: str = "", source: str = "batch") -> dict[str, Any]:
     return {
         "asset_id": asset.get("id"),
@@ -728,6 +791,12 @@ def base_result(asset: dict[str, Any], status: str, connectivity: str = "unreach
         "ip_reachability_exit_code": "",
         "ip_reachability_duration_ms": "",
         "ip_reachability_remark": "",
+        "tcp_reachability": "not_checked",
+        "tcp_reachability_source": "",
+        "tcp_reachability_ports": [],
+        "tcp_reachability_checked_at": "",
+        "tcp_reachability_duration_ms": "",
+        "tcp_reachability_remark": "",
         "probe_status": status,
         "probe_source": source,
         "original_probe_status": "",
@@ -1292,6 +1361,8 @@ def result_row(result: dict[str, Any]) -> list[Any]:
         result.get("ip_type", ""),
         result.get("ip_reachability", ""),
         result.get("ip_reachability_remark", ""),
+        result.get("tcp_reachability", ""),
+        result.get("tcp_reachability_remark", ""),
         result.get("probe_status", ""),
         result.get("node", ""),
         result.get("probe_source", ""),
@@ -1305,6 +1376,7 @@ PROBLEM_STATUSES = (
     "ip_mismatch",
     "duplicate_asset",
     "jumpserver_unreachable_ip_reachable",
+    "jumpserver_unreachable_tcp_open",
     "unreachable",
     "api_error",
     "log_fetch_error",
@@ -1380,7 +1452,7 @@ def build_issue_index(results: list[dict[str, Any]], status_counts: Counter[str]
 def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime, finished_at: dt.datetime, summary: dict[str, Any]) -> str:
     status_counts = probe_status_counts(results)
     abnormal = [result for result in results if result.get("probe_status") not in {"ok_static"}]
-    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "IP可达性", "IP可达性说明", "探测状态", "节点", "探测来源", "备注"]
+    headers = ["资产名称", "资产IP", "默认IP", "探测IP列表", "IP一致", "网卡", "IP类型", "IP可达性", "IP可达性说明", "TCP可达性", "TCP可达性说明", "探测状态", "节点", "探测来源", "备注"]
     lines = [
         "# JumpServer 主机探测与 IP 配置检测报告",
         "",
@@ -1403,6 +1475,7 @@ def build_markdown_report(results: list[dict[str, Any]], started_at: dt.datetime
             "ip_mismatch",
             "duplicate_asset",
             "jumpserver_unreachable_ip_reachable",
+            "jumpserver_unreachable_tcp_open",
             "unreachable",
             "api_error",
             "log_fetch_error",
@@ -1573,6 +1646,30 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
                 if results[idx].get("ip_reachability") == "reachable":
                     results[idx]["probe_status"] = "jumpserver_unreachable_ip_reachable"
                     results[idx]["remark"] = "JumpServer Ops 返回连接失败，但部署机可 ping 通资产 IP"
+    if getattr(args, "tcp_reachability_check", False):
+        tcp_ports = parse_tcp_ports(getattr(args, "tcp_reachability_ports", "22")) or [22]
+        tcp_targets = [
+            (idx, result)
+            for idx, result in enumerate(results)
+            if result.get("probe_status") == "unreachable" and result.get("ip_reachability") != "reachable"
+        ]
+        with ThreadPoolExecutor(max_workers=bounded_tcp_workers(getattr(args, "tcp_reachability_workers", 32))) as executor:
+            futures = {
+                executor.submit(
+                    check_tcp_reachability,
+                    str(result.get("asset_ip") or ""),
+                    ports=tcp_ports,
+                    timeout=max(1, getattr(args, "tcp_reachability_timeout", 1)),
+                ): idx
+                for idx, result in tcp_targets
+            }
+            for future in as_completed(list(futures.keys())):
+                idx = futures[future]
+                reachability = future.result()
+                results[idx].update(reachability)
+                if results[idx].get("tcp_reachability") == "open":
+                    results[idx]["probe_status"] = "jumpserver_unreachable_tcp_open"
+                    results[idx]["remark"] = "JumpServer Ops 返回连接失败，但部署机可连通资产 TCP/SSH 端口"
     duplicates = duplicate_asset_map(assets)
     apply_duplicate_asset_annotations(results, duplicates)
     summary = {
@@ -1605,6 +1702,8 @@ def run_detect(args: argparse.Namespace) -> dict[str, Any]:
             "ops_task_ids": [record.get("task_id") for record in batch_records if record.get("task_id")],
             "ip_reachability_enabled": bool(getattr(args, "ip_reachability_check", False)),
             "ip_reachability_config": {"count": getattr(args, "ip_ping_count", 1), "timeout": getattr(args, "ip_ping_timeout", 1), "workers": bounded_ip_ping_workers(getattr(args, "ip_ping_workers", 32))},
+            "tcp_reachability_enabled": bool(getattr(args, "tcp_reachability_check", False)),
+            "tcp_reachability_config": {"ports": parse_tcp_ports(getattr(args, "tcp_reachability_ports", "22")) or [22], "timeout": getattr(args, "tcp_reachability_timeout", 1), "workers": bounded_tcp_workers(getattr(args, "tcp_reachability_workers", 32))},
         },
     )
     if can_resume and batch_records and all("results" in record for record in batch_records):
@@ -1661,6 +1760,10 @@ def main() -> None:
     detect.add_argument("--ip-ping-count", type=int, default=int(os.getenv("CHECK_IP_PING_COUNT", "1")))
     detect.add_argument("--ip-ping-timeout", type=int, default=int(os.getenv("CHECK_IP_PING_TIMEOUT", "1")))
     detect.add_argument("--ip-ping-workers", type=int, default=int(os.getenv("CHECK_IP_PING_WORKERS", "32")))
+    detect.add_argument("--tcp-reachability-check", action=argparse.BooleanOptionalAction, default=(os.getenv("CHECK_TCP_REACHABILITY", "false").lower() in {"1", "true", "yes"}), help="run deployment-host TCP checks for Ops-unreachable assets after ping is not reachable")
+    detect.add_argument("--tcp-reachability-ports", default=os.getenv("CHECK_TCP_REACHABILITY_PORTS", "22"))
+    detect.add_argument("--tcp-reachability-timeout", type=int, default=int(os.getenv("CHECK_TCP_REACHABILITY_TIMEOUT", "1")))
+    detect.add_argument("--tcp-reachability-workers", type=int, default=int(os.getenv("CHECK_TCP_REACHABILITY_WORKERS", "32")))
     detect.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="resume an unparsed all-in-one batch Ops task when possible")
     detect.add_argument("--resume-state", default=DEFAULT_RESUME_STATE, help="path to local inflight task state")
 

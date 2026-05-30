@@ -22,6 +22,7 @@ STATUS_COUNT_LABELS = {
     "ip_mismatch": "IP不匹配",
     "duplicate_asset": "重复资产",
     "jumpserver_unreachable_ip_reachable": "JumpServer不可达但IP可达",
+    "jumpserver_unreachable_tcp_open": "JumpServer不可达但SSH端口开放",
     "unreachable": "不可达",
     "api_error": "API异常",
     "log_fetch_error": "日志拉取异常",
@@ -41,6 +42,7 @@ ACTION_LABELS = {
     "confirm": "确认废弃",
     "protect": "保护",
     "review": "标记复查",
+    "delete": "删除资产",
 }
 
 
@@ -136,6 +138,7 @@ def build_markdown_message(
             "ip_mismatch",
             "duplicate_asset",
             "jumpserver_unreachable_ip_reachable",
+            "jumpserver_unreachable_tcp_open",
             "unreachable",
             "api_error",
             "log_fetch_error",
@@ -154,6 +157,18 @@ def build_markdown_message(
             f"{status_count_label(key)}: {status_counts.get(key, 0)}" for key in ordered if status_counts.get(key, 0)
         )
         lines.extend(["", f"- 分类：{count_text or '无异常分类'}"])
+    host_snapshot_diff = summary.get("host_snapshot_diff") if isinstance(summary.get("host_snapshot_diff"), dict) else {}
+    if host_snapshot_diff:
+        note = host_snapshot_diff.get("note")
+        if note:
+            lines.append(f"- 主机变化：{note}")
+        elif host_snapshot_diff.get("changed"):
+            lines.append(
+                "- 主机变化："
+                f"新增 {host_snapshot_diff.get('added', 0)} / "
+                f"消失 {host_snapshot_diff.get('removed', 0)} / "
+                f"状态变化 {host_snapshot_diff.get('status_changed', 0)}"
+            )
     cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
     if cleanup:
         plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
@@ -190,6 +205,7 @@ def ordered_status_counts(status_counts: dict[str, Any]) -> list[tuple[str, int]
         "ip_mismatch",
         "duplicate_asset",
         "jumpserver_unreachable_ip_reachable",
+        "jumpserver_unreachable_tcp_open",
         "unreachable",
         "api_error",
         "log_fetch_error",
@@ -242,6 +258,18 @@ def build_relay_message(
         issue_counts = [(key, value) for key, value in ordered_status_counts(status_counts) if key != "ok_static"]
         issue_text = "，".join(f"{status_count_label(key)}: {value}" for key, value in issue_counts) or "无"
         lines.extend([f"**概览**：正常 {ok_count} / 需关注 {attention_count}", f"**问题分类**：{issue_text}"])
+    host_snapshot_diff = summary.get("host_snapshot_diff") if isinstance(summary.get("host_snapshot_diff"), dict) else {}
+    if host_snapshot_diff:
+        note = host_snapshot_diff.get("note")
+        if note:
+            lines.append(f"**主机变化**：{note}")
+        elif host_snapshot_diff.get("changed"):
+            lines.append(
+                "**主机变化**："
+                f"新增 {host_snapshot_diff.get('added', 0)} / "
+                f"消失 {host_snapshot_diff.get('removed', 0)} / "
+                f"状态变化 {host_snapshot_diff.get('status_changed', 0)}"
+            )
     cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
     if cleanup:
         plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
@@ -264,6 +292,8 @@ def build_alert_summary(status: str, summary: dict[str, Any] | None = None) -> s
         parts.append(f"不可达 {status_counts.get('unreachable')}")
     if status_counts.get("jumpserver_unreachable_ip_reachable"):
         parts.append(f"IP可达需复核 {status_counts.get('jumpserver_unreachable_ip_reachable')}")
+    if status_counts.get("jumpserver_unreachable_tcp_open"):
+        parts.append(f"SSH开放需复核 {status_counts.get('jumpserver_unreachable_tcp_open')}")
     cleanup = summary.get("cleanup") if isinstance(summary.get("cleanup"), dict) else {}
     plan = cleanup.get("plan") if isinstance(cleanup.get("plan"), dict) else {}
     plan_summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
@@ -391,6 +421,89 @@ def send_admin_action_notification(
     payload = build_wecom_payload(channel, "主机清理管理操作", content)
     send_wecom_message(webhook_url, payload, timeout=10)
     return {"status": "sent", "action": action}
+
+
+def delete_attempt_items(apply_result: dict[str, Any]) -> list[dict[str, Any]]:
+    results = apply_result.get("results") if isinstance(apply_result.get("results"), list) else []
+    return [
+        item
+        for item in results
+        if isinstance(item, dict)
+        and (item.get("status") == "deleted" or item.get("api_operation") == "delete")
+    ]
+
+
+def deleted_apply_items(apply_result: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in delete_attempt_items(apply_result) if item.get("status") == "deleted"]
+
+
+def build_cleanup_delete_message(apply_result: dict[str, Any], admin_url: str = "") -> str:
+    attempts = delete_attempt_items(apply_result)
+    deleted = [item for item in attempts if item.get("status") == "deleted"]
+    failed = [item for item in attempts if item.get("status") != "deleted"]
+    lines = [f"**操作**：删除资产", f"**删除数量**：{len(deleted)}", f"**删除失败**：{len(failed)}"]
+    profile = apply_result.get("profile", "")
+    if profile:
+        lines.append(f"**Profile**：{profile}")
+    result_path = apply_result.get("result_path", "")
+    if result_path:
+        lines.append(f"**清理结果**：`{result_path}`")
+    for idx, item in enumerate(attempts, 1):
+        asset_name = item.get("asset_name") or item.get("asset_id") or "-"
+        asset_ip = item.get("asset_ip") or "-"
+        status_text = "删除成功" if item.get("status") == "deleted" else "删除失败"
+        api_status = item.get("api_status")
+        if api_status is not None:
+            status_text += f"（HTTP {api_status}）"
+        lines.extend(
+            [
+                "",
+                f"{idx}. **资产**：{asset_name}（{asset_ip}）",
+                f"   - 状态：{status_text}",
+                f"   - 资产ID：{item.get('asset_id', '-')}",
+                f"   - 操作人：{item.get('operator', '-')}",
+                f"   - 原因：{item.get('reason', '-')}",
+                f"   - delete_ack：`{item.get('delete_ack', '-')}`",
+            ]
+        )
+        if item.get("archive_path"):
+            lines.append(f"   - 存档：`{item.get('archive_path')}`")
+        if item.get("result_path"):
+            lines.append(f"   - 结果：`{item.get('result_path')}`")
+    if admin_url:
+        lines.append(f"\n[查看管理页面]({admin_url})")
+    return "\n".join(lines)
+
+
+def send_cleanup_delete_notification(
+    apply_result: dict[str, Any],
+    *,
+    webhook_url: str = "",
+    channel: str = "",
+    admin_url: str = "",
+) -> dict[str, Any]:
+    attempts = delete_attempt_items(apply_result)
+    deleted = [item for item in attempts if item.get("status") == "deleted"]
+    failed = [item for item in attempts if item.get("status") != "deleted"]
+    if not attempts:
+        return {"status": "skipped", "reason": "no delete attempts"}
+    webhook_url = webhook_url or os.getenv("WECOM_WEBHOOK_URL", "").strip()
+    channel = channel or os.getenv("WECOM_CHANNEL", "wecom")
+    admin_url = admin_url or os.getenv("ACCESS_URL", "").strip()
+    content = build_cleanup_delete_message(apply_result, admin_url=admin_url)
+    payload = build_wecom_payload(channel, "主机清理删除操作", content)
+    if not webhook_url:
+        return {
+            "status": "skipped",
+            "reason": "WECOM_WEBHOOK_URL not configured",
+            "deleted_count": len(deleted),
+            "delete_failed_count": len(failed),
+            "delete_attempt_count": len(attempts),
+            "payload": payload,
+            "content": content,
+        }
+    send_wecom_message(webhook_url, payload, timeout=10)
+    return {"status": "sent", "action": "delete", "deleted_count": len(deleted), "delete_failed_count": len(failed), "delete_attempt_count": len(attempts)}
 
 
 def notify(

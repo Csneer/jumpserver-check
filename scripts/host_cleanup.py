@@ -15,7 +15,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import jms_host_ip_check, profile_env  # noqa: E402
+from scripts import jms_host_ip_check, profile_env, wecom_notify  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ELIGIBLE_SOURCE = "weekly_scheduled"
@@ -176,11 +176,16 @@ def result_status(result: dict[str, Any]) -> str:
 
 
 def is_unreachable_result(result: dict[str, Any]) -> bool:
-    return result_status(result) == "unreachable" and str(result.get("connectivity") or "") == "unreachable" and str(result.get("ip_reachability") or "") != "reachable"
+    return (
+        result_status(result) == "unreachable"
+        and str(result.get("connectivity") or "") == "unreachable"
+        and str(result.get("ip_reachability") or "") != "reachable"
+        and str(result.get("tcp_reachability") or "") != "open"
+    )
 
 
 def is_review_reachable_result(result: dict[str, Any]) -> bool:
-    return result_status(result) == "jumpserver_unreachable_ip_reachable" and str(result.get("connectivity") or "") == "unreachable"
+    return result_status(result) in {"jumpserver_unreachable_ip_reachable", "jumpserver_unreachable_tcp_open"} and str(result.get("connectivity") or "") == "unreachable"
 
 
 def index_unreachable(records: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -278,18 +283,26 @@ def has_ping_reachable_evidence(result: dict[str, Any]) -> bool:
     return str(result.get("ip_reachability") or "") == "reachable" or result_status(result) == "jumpserver_unreachable_ip_reachable"
 
 
+def has_tcp_open_evidence(result: dict[str, Any]) -> bool:
+    return str(result.get("tcp_reachability") or "") == "open" or result_status(result) == "jumpserver_unreachable_tcp_open"
+
+
 def build_review_required_item(asset_id: str, evidences: list[dict[str, Any]]) -> dict[str, Any]:
-    reachable = next((item for item in reversed(evidences) if has_ping_reachable_evidence(item["result"])), evidences[-1])
+    reachable = next((item for item in reversed(evidences) if has_ping_reachable_evidence(item["result"]) or has_tcp_open_evidence(item["result"])), evidences[-1])
     result = reachable["result"]
+    tcp_open = has_tcp_open_evidence(result) and not has_ping_reachable_evidence(result)
     return {
         "asset_id": asset_id,
         "asset_name": result.get("asset_name") or "",
         "asset_ip": result.get("asset_ip") or "",
         "node": result.get("node") or "",
-        "reason": "ip_reachable_requires_review",
-        "ip_reachability": "reachable",
+        "reason": "tcp_open_requires_review" if tcp_open else "ip_reachable_requires_review",
+        "ip_reachability": result.get("ip_reachability") or ("reachable" if not tcp_open else ""),
         "ip_reachability_checked_at": result.get("ip_reachability_checked_at") or "",
         "ip_reachability_remark": result.get("ip_reachability_remark") or result.get("remark") or "",
+        "tcp_reachability": result.get("tcp_reachability") or "",
+        "tcp_reachability_checked_at": result.get("tcp_reachability_checked_at") or "",
+        "tcp_reachability_remark": result.get("tcp_reachability_remark") or "",
         "evidence_run_ids": [str(item.get("run_id") or "") for item in evidences],
         "evidence_paths": [str(item.get("raw_path") or "") for item in evidences],
     }
@@ -311,7 +324,7 @@ def latest_review_required(records: list[dict[str, Any]]) -> list[dict[str, Any]
             }
     reviews: list[dict[str, Any]] = []
     for asset_id, item in sorted(latest_by_asset.items()):
-        if has_ping_reachable_evidence(item["result"]):
+        if has_ping_reachable_evidence(item["result"]) or has_tcp_open_evidence(item["result"]):
             reviews.append(build_review_required_item(asset_id, [item]))
     return reviews
 
@@ -344,7 +357,7 @@ def evaluate_cleanup(profile: str, raw_dir: Path, state_dir: Path, output_dir: P
 
     for asset_id, evidences in sorted(unreachable.items()):
         last_two_or_less = evidences[-2:]
-        latest_reachable = any(has_ping_reachable_evidence(item["result"]) for item in last_two_or_less)
+        latest_reachable = any(has_ping_reachable_evidence(item["result"]) or has_tcp_open_evidence(item["result"]) for item in last_two_or_less)
         if latest_reachable:
             review_item = build_review_required_item(asset_id, last_two_or_less)
             if asset_id in review_by_asset:
@@ -457,6 +470,21 @@ def delete_allowed(candidate: dict[str, Any], *, allow_delete: bool) -> bool:
     )
 
 
+def cleanup_apply_audit_fields(candidate: dict[str, Any], *, profile: str) -> dict[str, Any]:
+    confirmation = candidate.get("confirmation") if isinstance(candidate.get("confirmation"), dict) else {}
+    fields = {
+        "profile": str(candidate.get("profile") or profile),
+        "asset_id": candidate.get("asset_id"),
+        "asset_name": str(candidate.get("asset_name") or confirmation.get("asset_name") or ""),
+        "asset_ip": str(candidate.get("asset_ip") or confirmation.get("asset_ip") or ""),
+    }
+    for key in ("operator", "reason", "delete_ack"):
+        value = confirmation.get(key) or candidate.get(key)
+        if value:
+            fields[key] = value
+    return fields
+
+
 def apply_cleanup_plan(
     plan: dict[str, Any],
     *,
@@ -477,6 +505,7 @@ def apply_cleanup_plan(
         fresh_plan = evaluate_cleanup(profile, Path(raw_dir_text), state_dir, output_dir, write_plan=False)
         fresh_candidates = index_candidates_by_asset(fresh_plan)
         rechecked_plan = True
+    path = output_dir / f"cleanup-result-{dt.datetime.now().astimezone().strftime('%Y%m%d-%H%M%S')}.json"
     for candidate in plan.get("candidates") or []:
         asset_id = candidate.get("asset_id")
         fresh_candidate = fresh_candidates.get(str(asset_id)) if rechecked_plan else candidate
@@ -485,7 +514,7 @@ def apply_cleanup_plan(
             continue
         candidate = merge_fresh_candidate(candidate, fresh_candidate)
         action = candidate.get("planned_action") or "disable"
-        item = {"asset_id": asset_id, "action": action}
+        item = {**cleanup_apply_audit_fields(candidate, profile=profile), "action": action, "result_path": str(path)}
         if candidate.get("planned_action_mismatch"):
             item.update({"status": "skipped_plan_action_changed", "planned_action_mismatch": candidate["planned_action_mismatch"]})
             results.append(item)
@@ -533,16 +562,40 @@ def apply_cleanup_plan(
                 results.append(item)
                 continue
             mutate_status, payload = client.delete(f"/api/v1/assets/assets/{asset_id}/", timeout=MUTATION_TIMEOUT)
-            item.update({"api_status": mutate_status, "api_response": payload, "status": "deleted" if mutate_status < 400 else "delete_failed"})
+            item.update({"api_operation": "delete", "api_status": mutate_status, "api_response": payload, "status": "deleted" if mutate_status < 400 else "delete_failed"})
         else:
             mutate_status, payload = client.patch(f"/api/v1/assets/assets/{asset_id}/", {"is_active": False}, timeout=MUTATION_TIMEOUT)
             item.update({"api_status": mutate_status, "api_response": payload, "status": "disabled" if mutate_status < 400 else "disable_failed"})
         results.append(item)
     result_payload = {"profile": profile, "generated_at": now_iso(), "dry_run": dry_run, "results": results}
-    path = output_dir / f"cleanup-result-{dt.datetime.now().astimezone().strftime('%Y%m%d-%H%M%S')}.json"
-    atomic_write_json(path, result_payload)
     result_payload["result_path"] = str(path)
+    atomic_write_json(path, result_payload)
     return result_payload
+
+
+def notify_cleanup_delete_result(result_payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        notification = wecom_notify.send_cleanup_delete_notification(result_payload)
+    except Exception as exc:  # noqa: BLE001 - notification failure must not hide cleanup result.
+        notification = {"status": "failed", "error": str(exc)}
+        print(f"提示：企业微信删除操作通知失败：{exc}", file=sys.stderr)
+    result_payload["delete_notification"] = notification
+    result_path = str(result_payload.get("result_path") or "")
+    if result_path:
+        try:
+            atomic_write_json(Path(result_path), result_payload)
+        except Exception as exc:  # noqa: BLE001 - notification persistence is audit-only after mutation.
+            result_payload["delete_notification_persist"] = {"status": "failed", "error": str(exc)}
+            print(f"提示：企业微信删除操作通知结果回写失败：{exc}", file=sys.stderr)
+    return notification
+
+
+def has_delete_attempt(result_payload: dict[str, Any]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and (item.get("status") == "deleted" or item.get("api_operation") == "delete")
+        for item in result_payload.get("results") or []
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -571,6 +624,8 @@ def main() -> None:
     else:
         plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         payload = apply_cleanup_plan(plan, profile=args.profile, state_dir=state_dir, output_dir=output_dir, dry_run=args.dry_run, allow_delete=args.allow_delete)
+        if has_delete_attempt(payload):
+            notify_cleanup_delete_result(payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

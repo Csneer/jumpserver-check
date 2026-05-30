@@ -1108,3 +1108,95 @@ def test_run_detect_uses_ip_ping_workers_executor(monkeypatch):
     result = check.run_detect(args)
     assert captured['max_workers'] == 7
     assert result['status_counts']['unreachable'] == 1
+
+
+def test_check_tcp_reachability_uses_socket_and_records_open(monkeypatch):
+    calls = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.timeout = None
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect_ex(self, address):
+            calls.append((address, self.timeout))
+            return 0
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(check.socket, "socket", lambda *args, **kwargs: FakeSocket())
+
+    result = check.check_tcp_reachability("192.0.2.10", ports=[22], timeout=1)
+
+    assert result["tcp_reachability"] == "open"
+    assert result["tcp_reachability_source"] == "deployment_host_socket"
+    assert result["tcp_reachability_ports"] == [22]
+    assert "ssh port open" in result["tcp_reachability_remark"]
+    assert calls == [(('192.0.2.10', 22), 1)]
+
+
+def test_check_tcp_reachability_handles_invalid_ip_port_and_closed(monkeypatch):
+    invalid_ip = check.check_tcp_reachability("not-an-ip", ports=[22], timeout=1)
+    invalid_port = check.check_tcp_reachability("192.0.2.10", ports=[0], timeout=1)
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            pass
+
+        def connect_ex(self, address):
+            return 111
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(check.socket, "socket", lambda *args, **kwargs: FakeSocket())
+    closed = check.check_tcp_reachability("192.0.2.10", ports=[22], timeout=1)
+
+    assert invalid_ip["tcp_reachability"] == "unknown"
+    assert "invalid asset ip" in invalid_ip["tcp_reachability_remark"]
+    assert invalid_port["tcp_reachability"] == "unknown"
+    assert "invalid tcp port" in invalid_port["tcp_reachability_remark"]
+    assert closed["tcp_reachability"] == "closed"
+
+
+def test_run_detect_marks_tcp_open_review_required_after_ping_not_reachable(monkeypatch):
+    assets = [{"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "platform": {"name": "Linux"}, "nodes": []}]
+    monkeypatch.setattr(check, "validate", lambda client: {"ok": True})
+    monkeypatch.setattr(check, "fetch_active_assets", lambda client, page_size, max_assets=None: assets)
+    monkeypatch.setattr(check, "fetch_authorized_assets", lambda client, page_size: assets)
+    monkeypatch.setattr(check, "JumpServerClient", lambda no_proxy=False: object())
+    monkeypatch.setattr(check, "run_batch", lambda *args, **kwargs: {"results": [{**check.base_result(assets[0], "unreachable"), "asset_ip": "192.0.2.10"}], "task_id": "t1"})
+    monkeypatch.setattr(check, "duplicate_asset_map", lambda assets: {})
+    monkeypatch.setattr(check, "apply_duplicate_asset_annotations", lambda results, duplicates: None)
+    monkeypatch.setattr(check, "check_ip_reachability", lambda *args, **kwargs: {"ip_reachability": "unreachable", "ip_reachability_source": "deployment_host_ping", "ip_reachability_checked_at": "now", "ip_reachability_command": [], "ip_reachability_exit_code": 1, "ip_reachability_duration_ms": 1, "ip_reachability_remark": "x"})
+    monkeypatch.setattr(check, "check_tcp_reachability", lambda *args, **kwargs: {"tcp_reachability": "open", "tcp_reachability_source": "deployment_host_socket", "tcp_reachability_ports": [22], "tcp_reachability_checked_at": "now", "tcp_reachability_duration_ms": 1, "tcp_reachability_remark": "ssh port open from deployment host"})
+    captured = {}
+    monkeypatch.setattr(check, "write_reports", lambda results, *args, **kwargs: captured.setdefault("results", results) or {"report": "r", "latest": "l", "raw": "x"})
+
+    args = check.argparse.Namespace(command='detect', no_proxy=True, page_size=100, max_assets=None, query='', output_dir='reports/yuque', raw_output_dir='artifacts/raw', retention_count=12, runas='root', profile='local', run_id='rid', run_source='manual', cleanup_evidence_eligible=False, resume=True, resume_state='artifacts/state/x.json', execution_mode='batch', batch_size=0, timeout=-1, wait_timeout=1200, poll_interval=30, batch_gap=0, concurrency=12, ip_reachability_check=True, ip_ping_count=1, ip_ping_timeout=1, ip_ping_workers=7, tcp_reachability_check=True, tcp_reachability_ports='22', tcp_reachability_timeout=1, tcp_reachability_workers=7)
+    result = check.run_detect(args)
+
+    assert result['status_counts']['jumpserver_unreachable_tcp_open'] == 1
+    assert captured["results"][0]["probe_status"] == "jumpserver_unreachable_tcp_open"
+    assert captured["results"][0]["tcp_reachability"] == "open"
+
+
+def test_run_detect_does_not_tcp_probe_non_unreachable_error_states(monkeypatch):
+    assets = [{"id": "asset-1", "name": "host-a", "address": "192.0.2.10", "platform": {"name": "Linux"}, "nodes": []}]
+    monkeypatch.setattr(check, "validate", lambda client: {"ok": True})
+    monkeypatch.setattr(check, "fetch_active_assets", lambda client, page_size, max_assets=None: assets)
+    monkeypatch.setattr(check, "fetch_authorized_assets", lambda client, page_size: assets)
+    monkeypatch.setattr(check, "JumpServerClient", lambda no_proxy=False: object())
+    monkeypatch.setattr(check, "run_batch", lambda *args, **kwargs: {"results": [{**check.base_result(assets[0], "ops_module_error"), "asset_ip": "192.0.2.10"}], "task_id": "t1"})
+    monkeypatch.setattr(check, "duplicate_asset_map", lambda assets: {})
+    monkeypatch.setattr(check, "apply_duplicate_asset_annotations", lambda results, duplicates: None)
+    monkeypatch.setattr(check, "check_tcp_reachability", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not probe tcp")))
+    monkeypatch.setattr(check, "write_reports", lambda *args, **kwargs: {"report": "r", "latest": "l", "raw": "x"})
+
+    args = check.argparse.Namespace(command='detect', no_proxy=True, page_size=100, max_assets=None, query='', output_dir='reports/yuque', raw_output_dir='artifacts/raw', retention_count=12, runas='root', profile='local', run_id='rid', run_source='manual', cleanup_evidence_eligible=False, resume=True, resume_state='artifacts/state/x.json', execution_mode='batch', batch_size=0, timeout=-1, wait_timeout=1200, poll_interval=30, batch_gap=0, concurrency=12, ip_reachability_check=False, ip_ping_count=1, ip_ping_timeout=1, ip_ping_workers=7, tcp_reachability_check=True, tcp_reachability_ports='22', tcp_reachability_timeout=1, tcp_reachability_workers=7)
+    result = check.run_detect(args)
+
+    assert result['status_counts']['ops_module_error'] == 1
