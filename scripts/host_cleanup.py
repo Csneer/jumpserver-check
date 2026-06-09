@@ -32,13 +32,15 @@ def now_iso() -> str:
 
 
 def cleanup_profile_state_dir(profile: str, base: Path | None = None) -> Path:
-    root = base or (PROJECT_ROOT / "artifacts" / "state")
-    return root / profile
+    if base is not None:
+        return base / profile_env.normalize_profile(profile)
+    return profile_env.build_runtime_context(profile).state_dir
 
 
 def cleanup_output_dir(profile: str, base: Path | None = None) -> Path:
-    root = base or (PROJECT_ROOT / "artifacts" / "cleanup")
-    return root / profile
+    if base is not None:
+        return base / profile_env.normalize_profile(profile)
+    return profile_env.build_runtime_context(profile).cleanup_dir
 
 
 def load_json_file(path: Path, default: Any) -> Any:

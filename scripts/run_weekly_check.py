@@ -48,6 +48,10 @@ def load_runtime_context(profile: str | None = None, env_file: str | None = None
     return RuntimeContext.for_profile(profile, env_file)
 
 
+def load_runtime_context(profile: str | None = None, env_file: str | None = None) -> profile_env.RuntimeContext:
+    return profile_env.build_runtime_context(profile, env_file)
+
+
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name, "").strip()
     if not value:
@@ -444,12 +448,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default=profile)
     parser.add_argument("--env-file", default=pre_args.env_file)
     parser.add_argument("--no-proxy", action="store_true")
-    parser.add_argument("--wait-timeout", type=int, default=runtime_context.wait_timeout)
-    parser.add_argument("--poll-interval", type=int, default=runtime_context.poll_interval)
-    parser.add_argument("--output-dir", default=str(runtime_context.output_dir))
-    parser.add_argument("--raw-output-dir", default=str(runtime_context.raw_output_dir))
-    parser.add_argument("--resume-state", default=str(runtime_context.resume_state))
-    parser.add_argument("--retention-count", type=int, default=runtime_context.retention_count)
+    parser.add_argument("--wait-timeout", type=int, default=env_int("CHECK_WAIT_TIMEOUT", 1200))
+    parser.add_argument("--poll-interval", type=int, default=env_int("CHECK_POLL_INTERVAL", 30))
+    parser.add_argument("--output-dir", default=str(runtime_context.output_dir.relative_to(PROJECT_ROOT)))
+    parser.add_argument("--raw-output-dir", default=str(runtime_context.raw_output_dir.relative_to(PROJECT_ROOT)))
+    parser.add_argument(
+        "--resume-state",
+        default=str(runtime_context.resume_state),
+    )
+    parser.add_argument("--retention-count", type=int, default=env_int("CHECK_RETENTION_COUNT", 12))
     parser.add_argument("--run-id", default="")
     parser.add_argument(
         "--run-source",
