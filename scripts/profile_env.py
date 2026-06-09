@@ -171,3 +171,12 @@ def build_runtime_context(profile: str | None = None, env_file: str | None = Non
         yuque_slug=profile_default_name(env, "CHECK_YUQUE_SLUG", "jumpserver-host-ip-check", slug=True),
         notify_title=profile_default_name(env, "CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"),
     )
+
+
+def display_path(path: Path, root: Path | None = None) -> str:
+    """Return a CLI-friendly path while preserving absolute custom paths."""
+    base = root or PROJECT_ROOT
+    try:
+        return str(path.relative_to(base))
+    except ValueError:
+        return str(path)

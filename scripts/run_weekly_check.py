@@ -450,8 +450,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-proxy", action="store_true")
     parser.add_argument("--wait-timeout", type=int, default=env_int("CHECK_WAIT_TIMEOUT", 1200))
     parser.add_argument("--poll-interval", type=int, default=env_int("CHECK_POLL_INTERVAL", 30))
-    parser.add_argument("--output-dir", default=str(runtime_context.output_dir.relative_to(PROJECT_ROOT)))
-    parser.add_argument("--raw-output-dir", default=str(runtime_context.raw_output_dir.relative_to(PROJECT_ROOT)))
+    parser.add_argument("--output-dir", default=profile_env.display_path(runtime_context.output_dir, PROJECT_ROOT))
+    parser.add_argument("--raw-output-dir", default=profile_env.display_path(runtime_context.raw_output_dir, PROJECT_ROOT))
     parser.add_argument(
         "--resume-state",
         default=str(runtime_context.resume_state),

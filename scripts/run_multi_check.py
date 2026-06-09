@@ -61,6 +61,13 @@ def build_profile_command(args: argparse.Namespace, profile: str) -> list[str]:
     command.extend(["--ip-ping-count", str(getattr(args, "ip_ping_count", 1))])
     command.extend(["--ip-ping-timeout", str(getattr(args, "ip_ping_timeout", 1))])
     command.extend(["--ip-ping-workers", str(getattr(args, "ip_ping_workers", 32))])
+    if getattr(args, "tcp_reachability_check", False):
+        command.append("--tcp-reachability-check")
+    else:
+        command.append("--no-tcp-reachability-check")
+    command.extend(["--tcp-reachability-ports", str(getattr(args, "tcp_reachability_ports", "22"))])
+    command.extend(["--tcp-reachability-timeout", str(getattr(args, "tcp_reachability_timeout", 1))])
+    command.extend(["--tcp-reachability-workers", str(getattr(args, "tcp_reachability_workers", 32))])
     if args.no_resume:
         command.append("--no-resume")
     if args.wait_timeout is not None:
@@ -133,6 +140,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ip-ping-count", type=int, default=1)
     parser.add_argument("--ip-ping-timeout", type=int, default=1)
     parser.add_argument("--ip-ping-workers", type=int, default=32)
+    parser.add_argument("--tcp-reachability-check", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--tcp-reachability-ports", default="22")
+    parser.add_argument("--tcp-reachability-timeout", type=int, default=1)
+    parser.add_argument("--tcp-reachability-workers", type=int, default=32)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--wait-timeout", type=int)
     parser.add_argument("--poll-interval", type=int)
