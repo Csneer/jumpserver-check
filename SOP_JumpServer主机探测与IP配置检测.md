@@ -182,19 +182,32 @@ Authorization: Token <your-api-key>
 Authorization: AccessKey <access_key_id>:<signature>
 ```
 
+### 4.1.1 统一入口命令映射
+
+第一阶段统一入口为 `python scripts/jumpserver_check.py <command> ...`，旧脚本命令保持兼容以保护 cron/systemd/SOP 存量调用。`RuntimeContext` 是 profile/env/path/defaults 的单一权威；facade 只分发命令，不重新定义 cleanup 或探测业务规则。
+
+| 统一入口 | 兼容旧命令 |
+|---|---|
+| `python scripts/jumpserver_check.py preflight ...` | `python scripts/preflight_check.py ...` |
+| `python scripts/jumpserver_check.py weekly ...` | `python scripts/run_weekly_check.py ...` |
+| `python scripts/jumpserver_check.py multi ...` | `python scripts/run_multi_check.py ...` |
+| `python scripts/jumpserver_check.py detect ...` | `python scripts/jms_host_ip_check.py detect ...` |
+| `python scripts/jumpserver_check.py cleanup evaluate/apply ...` | `python scripts/host_cleanup.py evaluate/apply ...` |
+| `python scripts/jumpserver_check.py admin ...` | `python scripts/cleanup_admin_server.py ...` |
+
 ### 4.2 连通性预检
 
 在正式开始前，先运行本地配置检查，确认 `.env` 关键项已填写且不是示例占位：
 
 ```bash
-python scripts/preflight_check.py --json
+python scripts/jumpserver_check.py preflight --json
 ```
 
 企业微信默认是可选项；若定时任务必须推送企业微信，则使用：
 
 ```bash
-python scripts/preflight_check.py --require-wecom
-python scripts/run_weekly_check.py --no-proxy --require-wecom
+python scripts/jumpserver_check.py preflight --require-wecom
+python scripts/jumpserver_check.py weekly --no-proxy --require-wecom
 ```
 
 通过本地配置检查后，再发一次简单 GET 请求验证 JumpServer 鉴权是否有效：
@@ -502,13 +515,13 @@ ip -o -4 addr show scope global
 手工多 profile 巡检入口示例：
 
 ```bash
-python3 scripts/run_multi_check.py --profiles local --no-proxy --require-wecom
+python3 scripts/jumpserver_check.py multi --profiles local --no-proxy --require-wecom
 ```
 
 正式周巡检（产生 eligible cleanup 证据）示例：
 
 ```bash
-python3 scripts/run_weekly_check.py \
+python3 scripts/jumpserver_check.py weekly \
   --profile local \
   --no-proxy \
   --run-source weekly_scheduled \
@@ -516,7 +529,7 @@ python3 scripts/run_weekly_check.py \
   --cleanup-evaluate
 ```
 
-当前 `run_weekly_check.py` 会本地启动 detect，并已透传 IP ping 与 TCP/SSH 可达性参数；TCP/SSH 端口探测默认关闭，只有配置 `CHECK_TCP_REACHABILITY=true` 或显式传入 `--tcp-reachability-check` 时启用：
+当前统一 weekly 入口（兼容 `run_weekly_check.py`）会本地启动 detect，并已透传 IP ping 与 TCP/SSH 可达性参数；TCP/SSH 端口探测默认关闭，只有配置 `CHECK_TCP_REACHABILITY=true` 或显式传入 `--tcp-reachability-check` 时启用：
 
 ```bash
 python scripts/jms_host_ip_check.py detect --execution-mode batch --batch-size 0 --timeout -1 --wait-timeout <seconds> --poll-interval <seconds> --output-dir <dir> --raw-output-dir <dir> --retention-count <n> --profile <profile> --run-id <run_id> --run-source <run_source> [--cleanup-evidence-eligible] --ip-reachability-check --ip-ping-count <n> --ip-ping-timeout <seconds> --ip-ping-workers <workers> [--tcp-reachability-check --tcp-reachability-ports 22 --tcp-reachability-timeout <seconds> --tcp-reachability-workers <workers>]

@@ -93,19 +93,19 @@ configs/profiles/test.env
 单环境巡检：
 
 ```powershell
-python scripts/run_weekly_check.py --profile prod --no-proxy --require-wecom
+python scripts/jumpserver_check.py weekly --profile prod --no-proxy --require-wecom
 ```
 
 显式指定配置文件：
 
 ```powershell
-python scripts/run_weekly_check.py --profile prod --env-file configs/profiles/prod.env --no-proxy
+python scripts/jumpserver_check.py weekly --profile prod --env-file configs/profiles/prod.env --no-proxy
 ```
 
 多环境并发巡检：
 
 ```powershell
-python scripts/run_multi_check.py --profiles prod,test,pre --parallel 3 --no-proxy --require-wecom
+python scripts/jumpserver_check.py multi --profiles prod,test,pre --parallel 3 --no-proxy --require-wecom
 ```
 
 每个 profile 默认使用独立输出目录：
@@ -120,18 +120,33 @@ artifacts/workflow/<profile>/
 
 语雀也按 profile 区分。每个 profile env 可单独配置 `YUQUE_REPO_NAMESPACE`、`YUQUE_TARGET_TOC_UUID` 或 `YUQUE_SIBLING_URL`，因此可以分布到不同知识库或不同目录。未显式配置标题和 slug 时，默认会自动带 profile，例如 `JumpServer 主机探测与 IP 配置检测报告 - prod`、`jumpserver-host-ip-check-prod-YYYYMMDD-HHMMSS`。
 
+## 统一入口与兼容命令映射
+
+第一阶段统一管理入口为 `scripts/jumpserver_check.py`。旧 `scripts/*.py` 命令继续兼容；推荐新 SOP/临时命令优先使用统一入口，已有 cron/systemd 可按原命令运行。Facade 只做命令分发，profile/env/path/defaults 由 `scripts/profile_env.py` 的 `RuntimeContext` 统一计算，cleanup 默认仍为只读且必须显式传入 cleanup flag 才会 evaluate/apply。
+
+| 统一入口 | 兼容旧命令 | 说明 |
+|---|---|---|
+| `python scripts/jumpserver_check.py weekly ...` | `python scripts/run_weekly_check.py ...` | 单 profile 周巡检、语雀同步、企业微信通知 |
+| `python scripts/jumpserver_check.py multi ...` | `python scripts/run_multi_check.py ...` | 多 profile 并发周巡检 |
+| `python scripts/jumpserver_check.py detect ...` | `python scripts/jms_host_ip_check.py detect ...` | 手工探测；统一入口可省略 `detect` 子命令 |
+| `python scripts/jumpserver_check.py preflight ...` | `python scripts/preflight_check.py ...` | profile 配置预检 |
+| `python scripts/jumpserver_check.py cleanup evaluate/apply ...` | `python scripts/host_cleanup.py evaluate/apply ...` | cleanup 计划评估/执行；默认不删除，delete 仍需五重门控 |
+| `python scripts/jumpserver_check.py admin ...` | `python scripts/cleanup_admin_server.py ...` | cleanup 确认管理页面 |
+| `python scripts/jumpserver_check.py notify ...` | `python scripts/wecom_notify.py ...` | 企业微信通知 |
+| `python scripts/jumpserver_check.py yuque ...` | `python scripts/yuque_markdown_sync.py ...` | Markdown 同步语雀 |
+
 ## 常用命令
 
 每周全流程巡检、同步语雀并推送企业微信：
 
 ```powershell
-python scripts/run_weekly_check.py --no-proxy
+python scripts/jumpserver_check.py weekly --no-proxy
 ```
 
 正式周巡检建议显式标记来源，便于稳定快照对比和清理证据链使用：
 
 ```powershell
-python scripts/run_weekly_check.py `
+python scripts/jumpserver_check.py weekly `
   --profile prod `
   --no-proxy `
   --run-source weekly_scheduled `
@@ -147,7 +162,7 @@ python scripts/run_weekly_check.py `
 部署机侧 TCP/SSH 端口探测默认关闭；需要用 SSH 端口开放状态辅助复核时显式启用：
 
 ```powershell
-python scripts/run_weekly_check.py `
+python scripts/jumpserver_check.py weekly `
   --profile prod `
   --no-proxy `
   --run-source weekly_scheduled `
@@ -162,13 +177,13 @@ TCP 探测使用 Python socket，不依赖 `nc` 或 shell 拼接。它只会在 
 全量批量探测默认支持中断接续：创建 JumpServer Ops job 后会把 `task_id` 写入 `artifacts/state/jms-host-ip-check-inflight.json`。如果本地脚本中断但 JumpServer job 仍在或已完成，下次运行会优先接续该任务并解析日志，不会重复提交新 job。需要强制新建任务时使用：
 
 ```powershell
-python scripts/run_weekly_check.py --no-proxy --no-resume
+python scripts/jumpserver_check.py weekly --no-proxy --no-resume
 ```
 
 全流程 dry-run 验证：
 
 ```powershell
-python scripts/run_weekly_check.py --no-proxy --max-assets 1 --dry-run-yuque --dry-run-notify
+python scripts/jumpserver_check.py weekly --no-proxy --max-assets 1 --dry-run-yuque --dry-run-notify
 ```
 
 只检查 `.env` 配置是否完整：
@@ -187,7 +202,7 @@ python scripts/preflight_check.py --profile prod --require-wecom --json
 
 ```powershell
 python scripts/preflight_check.py --require-wecom
-python scripts/run_weekly_check.py --no-proxy --require-wecom
+python scripts/jumpserver_check.py weekly --no-proxy --require-wecom
 ```
 
 验证鉴权：
@@ -277,13 +292,13 @@ python scripts\wecom_notify.py `
 Linux crontab 示例（只读巡检，不含清理）：
 
 ```cron
-0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python3 scripts/run_weekly_check.py --no-proxy --require-wecom >> logs/weekly-check.log 2>&1
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check.lock python3 scripts/jumpserver_check.py weekly --no-proxy --require-wecom >> logs/weekly-check.log 2>&1
 ```
 
 多环境 crontab 示例（含废弃主机清理全流程）：
 
 ```cron
-0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check-all.lock python3 scripts/run_multi_check.py --profiles prod,test --parallel 2 --no-proxy --require-wecom --run-source weekly_scheduled --cleanup-evidence-eligible --cleanup-evaluate --cleanup-apply-confirmed --cleanup-allow-delete >> logs/weekly-check.log 2>&1
+0 9 * * 1 cd /path/to/jumpserver-check && flock -n /tmp/jumpserver-check-all.lock python3 scripts/jumpserver_check.py multi --profiles prod,test --parallel 2 --no-proxy --require-wecom --run-source weekly_scheduled --cleanup-evidence-eligible --cleanup-evaluate --cleanup-apply-confirmed --cleanup-allow-delete >> logs/weekly-check.log 2>&1
 ```
 
 ## 输出
@@ -413,7 +428,7 @@ CLEANUP_ALLOW_DELETE=false
 
 ```bash
 CLEANUP_ADMIN_TOKEN=replace-with-local-token \
-python scripts/cleanup_admin_server.py --profile local --host 127.0.0.1 --port 8088
+python scripts/jumpserver_check.py admin --profile local --host 127.0.0.1 --port 8088
 ```
 
 页面默认会要求先登录，登录口令就是服务端配置的 `CLEANUP_ADMIN_TOKEN`。登录前不会加载候选主机、原始 JSON 或多 JumpServer profile 列表；登录后可以在页面右侧选择 JumpServer 配置分别查看各自的废弃候选。profile 来源包括启动参数 `--profile`、`CLEANUP_ADMIN_PROFILES` / `--profiles` 显式白名单，以及 `configs/profiles/*.env` 中发现的配置文件。
@@ -452,7 +467,22 @@ sudo systemctl status jumpserver-cleanup-admin.service
 
 > **重要**：`--cleanup-evidence-eligible` 是整个清理流程的基础。不带此参数的巡检不会产出有效证据，导致 cleanup evaluate 看不到候选主机，已有确认也会因”确认引用最新 run”被门控跳过。
 
-### 常用命令
+### 统一入口与兼容命令映射
+
+第一阶段统一管理入口为 `scripts/jumpserver_check.py`。旧 `scripts/*.py` 命令继续兼容；推荐新 SOP/临时命令优先使用统一入口，已有 cron/systemd 可按原命令运行。Facade 只做命令分发，profile/env/path/defaults 由 `scripts/profile_env.py` 的 `RuntimeContext` 统一计算，cleanup 默认仍为只读且必须显式传入 cleanup flag 才会 evaluate/apply。
+
+| 统一入口 | 兼容旧命令 | 说明 |
+|---|---|---|
+| `python scripts/jumpserver_check.py weekly ...` | `python scripts/run_weekly_check.py ...` | 单 profile 周巡检、语雀同步、企业微信通知 |
+| `python scripts/jumpserver_check.py multi ...` | `python scripts/run_multi_check.py ...` | 多 profile 并发周巡检 |
+| `python scripts/jumpserver_check.py detect ...` | `python scripts/jms_host_ip_check.py detect ...` | 手工探测；统一入口可省略 `detect` 子命令 |
+| `python scripts/jumpserver_check.py preflight ...` | `python scripts/preflight_check.py ...` | profile 配置预检 |
+| `python scripts/jumpserver_check.py cleanup evaluate/apply ...` | `python scripts/host_cleanup.py evaluate/apply ...` | cleanup 计划评估/执行；默认不删除，delete 仍需五重门控 |
+| `python scripts/jumpserver_check.py admin ...` | `python scripts/cleanup_admin_server.py ...` | cleanup 确认管理页面 |
+| `python scripts/jumpserver_check.py notify ...` | `python scripts/wecom_notify.py ...` | 企业微信通知 |
+| `python scripts/jumpserver_check.py yuque ...` | `python scripts/yuque_markdown_sync.py ...` | Markdown 同步语雀 |
+
+## 常用命令
 
 单环境巡检 + 清理（先 dry-run 验证）：
 
