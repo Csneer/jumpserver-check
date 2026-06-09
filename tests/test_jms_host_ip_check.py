@@ -1200,3 +1200,36 @@ def test_run_detect_does_not_tcp_probe_non_unreachable_error_states(monkeypatch)
     result = check.run_detect(args)
 
     assert result['status_counts']['ops_module_error'] == 1
+
+def test_detect_defaults_are_profile_isolated_when_not_explicit(monkeypatch, tmp_path):
+    monkeypatch.setattr(check.profile_env, "PROJECT_ROOT", tmp_path)
+    args = check.argparse.Namespace(
+        command="detect",
+        profile="prod",
+        output_dir="reports/yuque",
+        raw_output_dir="artifacts/raw",
+        resume_state=check.DEFAULT_RESUME_STATE,
+    )
+
+    check.apply_detect_profile_defaults(args, explicit_options=set())
+
+    assert args.output_dir == "reports/yuque/prod"
+    assert args.raw_output_dir == "artifacts/raw/prod"
+    assert args.resume_state == str(tmp_path / "artifacts/state/prod/jms-host-ip-check-inflight.json")
+
+
+def test_detect_explicit_paths_are_preserved(monkeypatch, tmp_path):
+    monkeypatch.setattr(check.profile_env, "PROJECT_ROOT", tmp_path)
+    args = check.argparse.Namespace(
+        command="detect",
+        profile="prod",
+        output_dir="reports/yuque",
+        raw_output_dir="artifacts/raw",
+        resume_state=check.DEFAULT_RESUME_STATE,
+    )
+
+    check.apply_detect_profile_defaults(args, explicit_options={"--output-dir", "--raw-output-dir", "--resume-state"})
+
+    assert args.output_dir == "reports/yuque"
+    assert args.raw_output_dir == "artifacts/raw"
+    assert args.resume_state == check.DEFAULT_RESUME_STATE
