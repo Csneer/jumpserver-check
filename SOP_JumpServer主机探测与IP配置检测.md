@@ -516,6 +516,7 @@ ip -o -4 addr show scope global
 
 ```bash
 python3 scripts/jumpserver_check.py multi --profiles local --no-proxy --require-wecom
+# 兼容旧命令：python3 scripts/run_multi_check.py --profiles local --no-proxy --require-wecom
 ```
 
 正式周巡检（产生 eligible cleanup 证据）示例：
