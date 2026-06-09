@@ -156,7 +156,7 @@ def runtime_path(env: ProfileEnv, key: str, fallback: str) -> Path:
 
 
 def build_runtime_context(profile: str | None = None, env_file: str | None = None) -> RuntimeContext:
-    env = load_profile_env(profile, env_file)
+    env = load_profile_env(profile, env_file, override=False)
     state_dir = runtime_path(env, "CHECK_STATE_DIR", "artifacts/state")
     return RuntimeContext(
         env=env,

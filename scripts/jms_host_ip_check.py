@@ -15,17 +15,37 @@ import re
 import socket
 import ssl
 import subprocess
+import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
 from urllib import error, parse, request
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import profile_env
 
 
 DEFAULT_ORG = "00000000-0000-0000-0000-000000000002"
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_RESUME_STATE = "artifacts/state/jms-host-ip-check-inflight.json"
+
+
+def apply_detect_profile_defaults(args: argparse.Namespace, *, explicit_options: set[str]) -> None:
+    """Apply profile-isolated detect paths unless the caller supplied explicit paths."""
+    profile = getattr(args, "profile", profile_env.DEFAULT_PROFILE)
+    normalized = profile_env.normalize_profile(profile)
+    if "--output-dir" not in explicit_options:
+        args.output_dir = profile_env.profile_path(getattr(args, "output_dir", "reports/yuque"), normalized)
+    if "--raw-output-dir" not in explicit_options:
+        args.raw_output_dir = profile_env.profile_path(getattr(args, "raw_output_dir", "artifacts/raw"), normalized)
+    if "--resume-state" not in explicit_options:
+        state_dir = profile_env.PROJECT_ROOT / profile_env.profile_path("artifacts/state", normalized)
+        args.resume_state = str(state_dir / Path(DEFAULT_RESUME_STATE).name)
 PROFILE_ENDPOINTS = (
     "/api/v1/users/profile/",
     "/api/v1/users/users/profile/",
@@ -1767,6 +1787,7 @@ def main() -> None:
     detect.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="resume an unparsed all-in-one batch Ops task when possible")
     detect.add_argument("--resume-state", default=DEFAULT_RESUME_STATE, help="path to local inflight task state")
 
+    explicit_options = {item for item in sys.argv[1:] if item.startswith("--")}
     args = parser.parse_args()
     if args.command == "validate-auth":
         client = JumpServerClient(no_proxy=args.no_proxy)
@@ -1785,6 +1806,7 @@ def main() -> None:
             assets = assets[: args.max_assets]
         print(compact(summarize_assets(assets)))
     elif args.command == "detect":
+        apply_detect_profile_defaults(args, explicit_options=explicit_options)
         print(compact(run_detect(args)))
 
 

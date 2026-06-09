@@ -48,9 +48,6 @@ def load_runtime_context(profile: str | None = None, env_file: str | None = None
     return RuntimeContext.for_profile(profile, env_file)
 
 
-def load_runtime_context(profile: str | None = None, env_file: str | None = None) -> profile_env.RuntimeContext:
-    return profile_env.build_runtime_context(profile, env_file)
-
 
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name, "").strip()

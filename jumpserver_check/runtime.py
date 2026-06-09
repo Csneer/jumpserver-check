@@ -7,7 +7,6 @@ Legacy scripts may keep their business logic, but their defaults should derive f
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,15 +18,15 @@ DEFAULT_NOTIFY_TITLE = "JumpServer 每周主机巡检"
 DEFAULT_RESUME_FILENAME = "jms-host-ip-check-inflight.json"
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name, "").strip().lower()
+def _env_bool(values: dict[str, str], name: str, default: bool) -> bool:
+    value = values.get(name, "").strip().lower()
     if not value:
         return default
     return value in {"1", "true", "yes"}
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name, "").strip()
+def _env_int(values: dict[str, str], name: str, default: int) -> int:
+    value = values.get(name, "").strip()
     if not value:
         return default
     try:
@@ -71,7 +70,7 @@ class RuntimeContext:
         profile: str | None = None,
         env_file: str | None = None,
         *,
-        override_env: bool = True,
+        override_env: bool = False,
     ) -> "RuntimeContext":
         env = profile_env.load_profile_env(profile, env_file, override=override_env)
         project_root = profile_env.PROJECT_ROOT
@@ -86,23 +85,23 @@ class RuntimeContext:
             state_dir=state_dir,
             resume_state=state_dir / DEFAULT_RESUME_FILENAME,
             workflow_dir=project_root / profile_env.profile_path("artifacts/workflow", env.profile),
-            cleanup_state_dir=host_cleanup.cleanup_profile_state_dir(env.profile, project_root / "artifacts" / "state"),
+            cleanup_state_dir=host_cleanup.cleanup_profile_state_dir("cleanup", state_dir),
             cleanup_output_dir=host_cleanup.cleanup_output_dir(env.profile, project_root / "artifacts" / "cleanup"),
             yuque_title=profile_env.profile_default_name(env, "CHECK_YUQUE_TITLE", DEFAULT_YUQUE_TITLE),
             yuque_slug=profile_env.profile_default_name(env, "CHECK_YUQUE_SLUG", DEFAULT_YUQUE_SLUG, slug=True),
             notify_title=profile_env.profile_default_name(env, "CHECK_NOTIFY_TITLE", DEFAULT_NOTIFY_TITLE),
-            wait_timeout=_env_int("CHECK_WAIT_TIMEOUT", 1200),
-            poll_interval=_env_int("CHECK_POLL_INTERVAL", 30),
-            retention_count=_env_int("CHECK_RETENTION_COUNT", 12),
-            run_source=os.getenv("CHECK_RUN_SOURCE", "manual"),
-            ip_reachability_check=_env_bool("CHECK_IP_REACHABILITY", True),
-            ip_ping_count=_env_int("CHECK_IP_PING_COUNT", 1),
-            ip_ping_timeout=_env_int("CHECK_IP_PING_TIMEOUT", 1),
-            ip_ping_workers=_env_int("CHECK_IP_PING_WORKERS", 32),
-            tcp_reachability_check=_env_bool("CHECK_TCP_REACHABILITY", False),
-            tcp_reachability_ports=os.getenv("CHECK_TCP_REACHABILITY_PORTS", "22"),
-            tcp_reachability_timeout=_env_int("CHECK_TCP_REACHABILITY_TIMEOUT", 1),
-            tcp_reachability_workers=_env_int("CHECK_TCP_REACHABILITY_WORKERS", 32),
+            wait_timeout=_env_int(env.values, "CHECK_WAIT_TIMEOUT", 1200),
+            poll_interval=_env_int(env.values, "CHECK_POLL_INTERVAL", 30),
+            retention_count=_env_int(env.values, "CHECK_RETENTION_COUNT", 12),
+            run_source=env.values.get("CHECK_RUN_SOURCE", "manual"),
+            ip_reachability_check=_env_bool(env.values, "CHECK_IP_REACHABILITY", True),
+            ip_ping_count=_env_int(env.values, "CHECK_IP_PING_COUNT", 1),
+            ip_ping_timeout=_env_int(env.values, "CHECK_IP_PING_TIMEOUT", 1),
+            ip_ping_workers=_env_int(env.values, "CHECK_IP_PING_WORKERS", 32),
+            tcp_reachability_check=_env_bool(env.values, "CHECK_TCP_REACHABILITY", False),
+            tcp_reachability_ports=env.values.get("CHECK_TCP_REACHABILITY_PORTS", "22"),
+            tcp_reachability_timeout=_env_int(env.values, "CHECK_TCP_REACHABILITY_TIMEOUT", 1),
+            tcp_reachability_workers=_env_int(env.values, "CHECK_TCP_REACHABILITY_WORKERS", 32),
         )
 
     def weekly_defaults(self) -> dict[str, object]:

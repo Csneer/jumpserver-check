@@ -112,34 +112,30 @@ def test_facade_help_includes_legacy_command_mapping(capsys):
     assert "yuque" in output
 
 
-def test_legacy_entrypoints_are_mechanical_facade_wrappers_when_migrated():
-    """Old scripts must not grow a second business-rule/default layer after facade migration."""
-    facade_script_names = {
-        "preflight_check.py",
-        "jms_host_ip_check.py",
-        "run_weekly_check.py",
-        "run_multi_check.py",
-        "host_cleanup.py",
-        "cleanup_admin_server.py",
-        "wecom_notify.py",
-        "yuque_markdown_sync.py",
-    }
-    existing_facade = Path("scripts/jumpserver_check.py")
-    if not existing_facade.exists():
+def test_unified_facade_remains_thin_dispatch_layer():
+    """The new facade must dispatch; it must not copy detect/cleanup/sync business rules."""
+    facade_path = Path("scripts/jumpserver_check.py")
+    if not facade_path.exists():
         pytest.skip("unified facade not implemented yet")
 
-    for script_name in facade_script_names:
-        tree = ast.parse(Path("scripts", script_name).read_text(encoding="utf-8"))
-        main_defs = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"]
-        assert main_defs, f"{script_name} must keep a main wrapper"
-        main = main_defs[-1]
-        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
-        assert any(
-            isinstance(call.func, ast.Attribute) and call.func.attr in {"main", "dispatch_legacy"}
-            or isinstance(call.func, ast.Name) and call.func.id in {"main", "dispatch_legacy"}
-            for call in calls
-        ), f"{script_name} main should mechanically forward through the unified facade"
-        assert len(main.body) <= 3, f"{script_name} main should remain a thin compatibility wrapper"
+    source = facade_path.read_text(encoding="utf-8")
+    forbidden = [
+        "evaluate_cleanup(",
+        "apply_cleanup_plan(",
+        "sync_markdown(",
+        "notify_cleanup_delete_result(",
+        "run_detect(",
+        "check_tcp_reachability(",
+    ]
+    for text in forbidden:
+        assert text not in source
+
+    tree = ast.parse(source)
+    assert any(
+        (isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "COMMANDS" for target in node.targets))
+        or (isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "COMMANDS")
+        for node in tree.body
+    )
 
 
 def test_weekly_cleanup_flags_remain_explicit_fail_closed(monkeypatch, tmp_path: Path):

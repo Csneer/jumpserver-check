@@ -10,6 +10,7 @@ service entrypoints. Runtime defaults and profile-aware paths remain owned by
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
@@ -55,26 +56,60 @@ def forwarded_argv(argv: Sequence[str]):
         sys.argv = previous
 
 
-def dispatch(command: str, argv: Sequence[str]) -> int:
-    """Dispatch a facade command without adding defaults or business rules."""
-    if command not in COMMANDS:
-        raise SystemExit(f"unknown command: {command}")
-    main, _ = COMMANDS[command]
-    forwarded = [*argv]
-    if command == "detect" and not any(item in {"validate-auth", "list-assets", "detect"} for item in forwarded):
-        forwarded.insert(0, "detect")
-    with forwarded_argv(forwarded):
+def _exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    print(code, file=sys.stderr)
+    return 1
+
+
+def _run_main(main: DispatchMain, argv: Sequence[str]) -> int:
+    with forwarded_argv(argv):
         try:
             main()
         except SystemExit as exc:
-            code = exc.code
-            if code is None:
-                return 0
-            if isinstance(code, int):
-                return code
-            print(code, file=sys.stderr)
-            return 1
+            return _exit_code(exc)
     return 0
+
+
+def _dispatch_preflight(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Validate local/profile configuration")
+    parser.add_argument("--profile", default=profile_env.DEFAULT_PROFILE)
+    parser.add_argument("--env-file", default="")
+    parser.add_argument("--require-wecom", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(list(argv))
+    result = preflight_check.validate_config(require_wecom=args.require_wecom, profile=args.profile, env_file=args.env_file)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"preflight: {'OK' if result.get('ok') else 'FAILED'}")
+    return 0 if result.get("ok") else 1
+
+
+def _dispatch_weekly(argv: Sequence[str]) -> int:
+    with forwarded_argv(argv):
+        args = run_weekly_check.parse_args()
+    record = run_weekly_check.run_workflow(args)
+    return 0 if record.get("status") == "success" else 1
+
+
+def dispatch(command: str, argv: Sequence[str]) -> int:
+    """Dispatch a facade command without adding workflow business rules."""
+    if command not in COMMANDS:
+        raise SystemExit(f"unknown command: {command}")
+    forwarded = [*argv]
+    main, _ = COMMANDS[command]
+    if command == "preflight" and main is preflight_check.main:
+        return _dispatch_preflight(forwarded)
+    if command == "weekly" and main is run_weekly_check.main:
+        return _dispatch_weekly(forwarded)
+    if command == "detect" and not any(item in {"validate-auth", "list-assets", "detect"} for item in forwarded):
+        forwarded.insert(0, "detect")
+    return _run_main(main, forwarded)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -85,7 +120,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:
+        return _exit_code(exc)
     return dispatch(args.command, args.args)
 
 
