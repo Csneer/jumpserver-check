@@ -21,6 +21,22 @@
 - 已实现废弃主机确认/清理扩展：默认只读；真实 delete/delete_failed 尝试会发送企业微信管理操作通知并把通知结果写入 cleanup result/workflow 元数据。
 - 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入、周巡检快照、TCP 复核、清理门控、企业微信通知等单元测试。
 
+
+## 统一入口与兼容脚本
+
+阶段一新增统一 facade：优先使用 `python -m jumpserver_check <command>`（或安装后 `jumpserver-check <command>`）管理所有功能；历史 `scripts/*.py` 命令继续兼容，作为现有 cron/systemd/SOP 的兼容入口保留。facade 只做薄分发，不复制业务规则；profile/env/path/default/run metadata 由 `jumpserver_check.runtime.RuntimeContext` 统一计算。
+
+| 功能 | 统一入口（优先） | 兼容旧入口 |
+| --- | --- | --- |
+| 配置预检 | `python -m jumpserver_check preflight --json` | `python scripts/preflight_check.py --json` |
+| 资产探测/列表 | `python -m jumpserver_check detect --no-proxy detect ...` | `python scripts/jms_host_ip_check.py --no-proxy detect ...` |
+| 单 profile 周巡检 | `python -m jumpserver_check weekly --profile prod --no-proxy` | `python scripts/run_weekly_check.py --profile prod --no-proxy` |
+| 多 profile 并发 | `python -m jumpserver_check multi --profiles prod,test --parallel 2` | `python scripts/run_multi_check.py --profiles prod,test --parallel 2` |
+| 清理计划/执行 | `python -m jumpserver_check cleanup evaluate --profile prod` | `python scripts/host_cleanup.py evaluate --profile prod` |
+| 清理确认 UI | `python -m jumpserver_check admin serve --profile prod` | `python scripts/cleanup_admin_server.py --profile prod` |
+
+安全边界不变：weekly 默认不执行 cleanup evaluate/apply；cleanup apply 默认 dry-run/禁删，真实 delete 仍必须同时满足环境变量、CLI、确认记录和审计通知门控。多 profile 默认路径继续隔离到 `reports/yuque/<profile>/`、`artifacts/raw/<profile>/`、`artifacts/state/<profile>/`、`artifacts/workflow/<profile>/` 和 `artifacts/cleanup/<profile>/`。
+
 ## 配置
 
 复制示例配置后填写真实 JumpServer 地址和 Access Key：

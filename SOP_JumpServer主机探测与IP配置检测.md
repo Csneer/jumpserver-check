@@ -151,6 +151,23 @@ SUCCESS → 按主机解析输出
 
 ## 4. 阶段一：初始化与鉴权
 
+### 4.0 统一入口与旧命令兼容
+
+优先使用统一入口执行本 SOP 中的操作：
+
+```bash
+python -m jumpserver_check preflight --json
+python -m jumpserver_check weekly --profile prod --no-proxy --require-wecom
+python -m jumpserver_check multi --profiles prod,test --parallel 2 --no-proxy
+python -m jumpserver_check cleanup evaluate --profile prod
+python -m jumpserver_check admin serve --profile prod --host 127.0.0.1 --port 8088
+```
+
+历史脚本入口（例如 `python scripts/preflight_check.py --json`、`python scripts/run_weekly_check.py ...`、`python scripts/run_multi_check.py ...`、`python scripts/host_cleanup.py ...`、`python scripts/cleanup_admin_server.py ...`）继续作为兼容命令保留，便于现有 cron/systemd/SOP 渐进迁移。统一入口只负责薄分发，profile/env/path/default/run metadata 统一由 `RuntimeContext` 计算；不得在 facade 或旧兼容入口复制 cleanup 业务规则。
+
+Cleanup 仍 fail-closed：未显式传入 `--cleanup-evaluate` / `--cleanup-apply-confirmed` 时 weekly 不会评估或执行清理；真实 delete 仍需要环境变量、CLI、人工确认和通知审计门控全部满足。
+
+
 ### 4.1 鉴权方式
 
 JumpServer API 支持以下两种鉴权头，推荐使用 Token：
