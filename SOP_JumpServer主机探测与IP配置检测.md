@@ -1,9 +1,9 @@
 # SOP：JumpServer 主机存活探测与 IP 配置类型检测
 
-**版本**：v1.1  
+**版本**：v1.2  
 **适用系统**：JumpServer v3.x+  
 **目标系统**：Linux（Windows 主机跳过）  
-**更新日期**：2026-05
+**更新日期**：2026-06-09
 
 ---
 
@@ -163,9 +163,11 @@ python -m jumpserver_check cleanup evaluate --profile prod
 python -m jumpserver_check admin serve --profile prod --host 127.0.0.1 --port 8088
 ```
 
-历史脚本入口（例如 `python scripts/preflight_check.py --json`、`python scripts/run_weekly_check.py ...`、`python scripts/run_multi_check.py ...`、`python scripts/host_cleanup.py ...`、`python scripts/cleanup_admin_server.py ...`）继续作为兼容命令保留，便于现有 cron/systemd/SOP 渐进迁移。统一入口只负责薄分发，profile/env/path/default/run metadata 统一由 `RuntimeContext` 计算；不得在 facade 或旧兼容入口复制 cleanup 业务规则。
+历史脚本入口（例如 `python scripts/preflight_check.py --json`、`python scripts/run_weekly_check.py ...`、`python scripts/run_multi_check.py ...`、`python scripts/host_cleanup.py ...`、`python scripts/cleanup_admin_server.py ...`）继续作为兼容命令保留，便于现有 cron/systemd/SOP 渐进迁移。统一入口只负责薄分发，profile/env/path/default/run metadata 统一由 `jumpserver_check.runtime.RuntimeContext` 计算；不得在 facade 或旧兼容入口复制 cleanup 业务规则。
 
 Cleanup 仍 fail-closed：未显式传入 `--cleanup-evaluate` / `--cleanup-apply-confirmed` 时 weekly 不会评估或执行清理；真实 delete 仍需要环境变量、CLI、人工确认和通知审计门控全部满足。
+
+本轮整合进展：第一阶段已落地统一 facade 与 `jumpserver_check.runtime.RuntimeContext`，历史脚本入口保持兼容；最终回归验证为 `python3 -m pytest -q` 218 passed、2 skipped，并通过 `compileall` 与 facade/legacy weekly、detect help smoke。
 
 
 ### 4.1 鉴权方式
@@ -184,7 +186,7 @@ Authorization: AccessKey <access_key_id>:<signature>
 
 ### 4.1.1 统一入口命令映射
 
-第一阶段统一入口为 `python scripts/jumpserver_check.py <command> ...`，旧脚本命令保持兼容以保护 cron/systemd/SOP 存量调用。`RuntimeContext` 是 profile/env/path/defaults 的单一权威；facade 只分发命令，不重新定义 cleanup 或探测业务规则。
+第一阶段统一入口为 `python -m jumpserver_check <command> ...`（或兼容 `python scripts/jumpserver_check.py <command> ...`），旧脚本命令保持兼容以保护 cron/systemd/SOP 存量调用。`jumpserver_check.runtime.RuntimeContext` 是 profile/env/path/defaults 的单一权威；facade 只分发命令，不重新定义 cleanup 或探测业务规则。
 
 | 统一入口 | 兼容旧命令 |
 |---|---|

@@ -19,6 +19,8 @@
 - 已生成带问题分类索引的 Markdown 报告和原始 JSON 运行记录，并自动维护 `jumpserver-host-ip-check-latest.md`。
 - 已内置语雀 Markdown 同步和企业微信 Markdown 通知脚本，不依赖外部 `yuqeu_sync` 目录。
 - 已实现废弃主机确认/清理扩展：默认只读；真实 delete/delete_failed 尝试会发送企业微信管理操作通知并把通知结果写入 cleanup result/workflow 元数据。
+- 已完成第一阶段统一管理入口整合：新增 `python -m jumpserver_check <command>` / `jumpserver-check <command>` facade，保留历史 `scripts/*.py` 兼容入口；`jumpserver_check.runtime.RuntimeContext` 统一 profile/env/path/default/run metadata，weekly/detect/multi/cleanup 路径继续按 profile 隔离。
+- 已完成统一入口回归验证：`python3 -m pytest -q` 为 218 passed、2 skipped，`compileall` 和 facade/legacy weekly、detect help smoke 均通过。
 - 已覆盖签名、资产归一化、重复资产标注、日志解析、报告写入、周巡检快照、TCP 复核、清理门控、企业微信通知等单元测试。
 
 
@@ -122,7 +124,7 @@ artifacts/workflow/<profile>/
 
 ## 统一入口与兼容命令映射
 
-第一阶段统一管理入口为 `scripts/jumpserver_check.py`。旧 `scripts/*.py` 命令继续兼容；推荐新 SOP/临时命令优先使用统一入口，已有 cron/systemd 可按原命令运行。Facade 只做命令分发，profile/env/path/defaults 由 `scripts/profile_env.py` 的 `RuntimeContext` 统一计算，cleanup 默认仍为只读且必须显式传入 cleanup flag 才会 evaluate/apply。
+第一阶段统一管理入口优先使用 `python -m jumpserver_check <command>`（安装后可用 `jumpserver-check <command>`），`python scripts/jumpserver_check.py <command>` 和旧 `scripts/*.py` 命令继续兼容；已有 cron/systemd 可按原命令运行。Facade 只做命令分发，profile/env/path/defaults 由 `jumpserver_check.runtime.RuntimeContext` 统一计算，cleanup 默认仍为只读且必须显式传入 cleanup flag 才会 evaluate/apply。
 
 | 统一入口 | 兼容旧命令 | 说明 |
 |---|---|---|
@@ -466,21 +468,6 @@ sudo systemctl status jumpserver-cleanup-admin.service
 | `--run-source weekly_scheduled` | 标记为定时巡检来源，cleanup evaluate 只认此来源的 raw 数据 |
 
 > **重要**：`--cleanup-evidence-eligible` 是整个清理流程的基础。不带此参数的巡检不会产出有效证据，导致 cleanup evaluate 看不到候选主机，已有确认也会因”确认引用最新 run”被门控跳过。
-
-### 统一入口与兼容命令映射
-
-第一阶段统一管理入口为 `scripts/jumpserver_check.py`。旧 `scripts/*.py` 命令继续兼容；推荐新 SOP/临时命令优先使用统一入口，已有 cron/systemd 可按原命令运行。Facade 只做命令分发，profile/env/path/defaults 由 `scripts/profile_env.py` 的 `RuntimeContext` 统一计算，cleanup 默认仍为只读且必须显式传入 cleanup flag 才会 evaluate/apply。
-
-| 统一入口 | 兼容旧命令 | 说明 |
-|---|---|---|
-| `python scripts/jumpserver_check.py weekly ...` | `python scripts/run_weekly_check.py ...` | 单 profile 周巡检、语雀同步、企业微信通知 |
-| `python scripts/jumpserver_check.py multi ...` | `python scripts/run_multi_check.py ...` | 多 profile 并发周巡检 |
-| `python scripts/jumpserver_check.py detect ...` | `python scripts/jms_host_ip_check.py detect ...` | 手工探测；统一入口可省略 `detect` 子命令 |
-| `python scripts/jumpserver_check.py preflight ...` | `python scripts/preflight_check.py ...` | profile 配置预检 |
-| `python scripts/jumpserver_check.py cleanup evaluate/apply ...` | `python scripts/host_cleanup.py evaluate/apply ...` | cleanup 计划评估/执行；默认不删除，delete 仍需五重门控 |
-| `python scripts/jumpserver_check.py admin ...` | `python scripts/cleanup_admin_server.py ...` | cleanup 确认管理页面 |
-| `python scripts/jumpserver_check.py notify ...` | `python scripts/wecom_notify.py ...` | 企业微信通知 |
-| `python scripts/jumpserver_check.py yuque ...` | `python scripts/yuque_markdown_sync.py ...` | Markdown 同步语雀 |
 
 ## 常用命令
 
