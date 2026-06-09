@@ -115,3 +115,59 @@ def profile_default_name(env: ProfileEnv, key: str, fallback: str, *, slug: bool
         return value
     separator = "-" if slug else " - "
     return f"{value}{separator}{env.profile}"
+
+
+@dataclass(frozen=True)
+class RuntimeContext:
+    """Single authority for profile-aware runtime paths/defaults.
+
+    The facade and orchestration scripts should derive profile/env/path/default
+    values from this context instead of recomputing profile-specific paths in
+    multiple entrypoints.
+    """
+
+    env: ProfileEnv
+    project_root: Path
+    output_dir: Path
+    raw_output_dir: Path
+    state_dir: Path
+    workflow_dir: Path
+    cleanup_dir: Path
+    resume_state: Path
+    yuque_title: str
+    yuque_slug: str
+    notify_title: str
+
+    @property
+    def profile(self) -> str:
+        return self.env.profile
+
+    @property
+    def env_file(self) -> str:
+        return self.env.env_file
+
+    @property
+    def loaded_files(self) -> list[str]:
+        return self.env.loaded_files
+
+
+def runtime_path(env: ProfileEnv, key: str, fallback: str) -> Path:
+    return PROJECT_ROOT / profile_default_path(env, key, fallback)
+
+
+def build_runtime_context(profile: str | None = None, env_file: str | None = None) -> RuntimeContext:
+    env = load_profile_env(profile, env_file)
+    state_dir = runtime_path(env, "CHECK_STATE_DIR", "artifacts/state")
+    return RuntimeContext(
+        env=env,
+        project_root=PROJECT_ROOT,
+        output_dir=runtime_path(env, "CHECK_OUTPUT_DIR", "reports/yuque"),
+        raw_output_dir=runtime_path(env, "CHECK_RAW_OUTPUT_DIR", "artifacts/raw"),
+        state_dir=state_dir,
+        workflow_dir=runtime_path(env, "CHECK_WORKFLOW_DIR", "artifacts/workflow"),
+        cleanup_dir=runtime_path(env, "CHECK_CLEANUP_DIR", "artifacts/cleanup"),
+        resume_state=state_dir / "jms-host-ip-check-inflight.json",
+        yuque_title=profile_default_name(env, "CHECK_YUQUE_TITLE", "JumpServer 主机探测与 IP 配置检测报告"),
+        yuque_slug=profile_default_name(env, "CHECK_YUQUE_SLUG", "jumpserver-host-ip-check", slug=True),
+        notify_title=profile_default_name(env, "CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"),
+    )
