@@ -622,7 +622,7 @@ def test_run_cleanup_steps_default_is_fail_closed(monkeypatch):
     monkeypatch.setattr(weekly.host_cleanup, "evaluate_cleanup", lambda *args, **kwargs: calls.append("evaluate"))
     monkeypatch.setattr(weekly.host_cleanup, "apply_cleanup_plan", lambda *args, **kwargs: calls.append("apply"))
 
-    result = weekly.run_cleanup_steps(make_args())
+    result = weekly.run_cleanup_steps(make_args(), None)
 
     assert result == {"status": "skipped", "reason": "cleanup not requested"}
     assert calls == []
