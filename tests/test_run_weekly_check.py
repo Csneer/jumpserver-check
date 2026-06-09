@@ -615,3 +615,14 @@ def test_yuque_failure_does_not_block_stable_snapshot_update_for_successful_week
     snapshot_path = tmp_path / "artifacts" / "state" / "prod" / "last-stable-host-snapshot.json"
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot["last_run_id"] == "run-yuque-fail"
+
+
+def test_run_cleanup_steps_default_is_fail_closed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(weekly.host_cleanup, "evaluate_cleanup", lambda *args, **kwargs: calls.append("evaluate"))
+    monkeypatch.setattr(weekly.host_cleanup, "apply_cleanup_plan", lambda *args, **kwargs: calls.append("apply"))
+
+    result = weekly.run_cleanup_steps(make_args())
+
+    assert result == {"status": "skipped", "reason": "cleanup not requested"}
+    assert calls == []

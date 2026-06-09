@@ -102,3 +102,20 @@ def test_build_profile_command_passes_ip_reachability_flags():
     assert '--ip-ping-count' in cmd and '1' in cmd
     assert '--ip-ping-timeout' in cmd and '1' in cmd
     assert '--ip-ping-workers' in cmd and '32' in cmd
+
+
+def test_build_profile_command_passes_tcp_reachability_flags():
+    args = multi.parse_args.__globals__['argparse'].Namespace(
+        no_proxy=False, require_wecom=False, dry_run_yuque=False, dry_run_notify=False,
+        cleanup_evaluate=False, cleanup_apply_confirmed=False, cleanup_dry_run=False, cleanup_allow_delete=False,
+        run_source='', cleanup_evidence_eligible=False, ip_reachability_check=False, ip_ping_count=1,
+        ip_ping_timeout=1, ip_ping_workers=32, tcp_reachability_check=True, tcp_reachability_ports='22,2222',
+        tcp_reachability_timeout=2, tcp_reachability_workers=9, no_resume=False, wait_timeout=None, poll_interval=None,
+    )
+
+    cmd = multi.build_profile_command(args, 'local')
+
+    assert '--tcp-reachability-check' in cmd
+    assert cmd[cmd.index('--tcp-reachability-ports') + 1] == '22,2222'
+    assert cmd[cmd.index('--tcp-reachability-timeout') + 1] == '2'
+    assert cmd[cmd.index('--tcp-reachability-workers') + 1] == '9'

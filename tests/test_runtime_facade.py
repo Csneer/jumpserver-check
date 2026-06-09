@@ -67,3 +67,11 @@ def test_cleanup_defaults_remain_fail_closed():
     # The facade owns no cleanup flags/defaults; weekly still defaults to no cleanup.
     weekly_args = jumpserver_check.run_weekly_check.parse_args
     assert callable(weekly_args)
+
+
+def test_display_path_preserves_absolute_custom_paths(tmp_path: Path):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside" / "reports"
+
+    assert profile_env.display_path(project / "reports", project) == "reports"
+    assert profile_env.display_path(outside, project) == str(outside)
