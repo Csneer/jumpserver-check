@@ -24,7 +24,7 @@ def test_runtime_context_profile_defaults_are_single_authority(monkeypatch, tmp_
     assert ctx.raw_output_dir == Path("artifacts/raw/prod")
     assert ctx.resume_state == tmp_path / "artifacts/state/prod/jms-host-ip-check-inflight.json"
     assert ctx.workflow_dir == tmp_path / "artifacts/workflow/prod"
-    assert ctx.cleanup_state_dir == tmp_path / "artifacts/state/prod/cleanup"
+    assert ctx.cleanup_state_dir == tmp_path / "artifacts/state/prod"
     assert ctx.cleanup_output_dir == tmp_path / "artifacts/cleanup/prod"
     assert ctx.yuque_slug == "custom-slug"
     assert ctx.yuque_title.endswith(" - prod")
@@ -37,6 +37,7 @@ def test_weekly_parser_uses_runtime_context_defaults(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(profile_env, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(profile_env, "PROFILE_ENV_DIR", profile_dir)
+    monkeypatch.delenv("CHECK_OUTPUT_DIR", raising=False)
     monkeypatch.setattr(weekly, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr("sys.argv", ["run_weekly_check.py", "--profile", "prod"])
 

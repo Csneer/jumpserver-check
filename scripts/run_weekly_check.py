@@ -18,6 +18,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import host_cleanup, preflight_check, profile_env, wecom_notify, yuque_markdown_sync  # noqa: E402
+from jumpserver_check.runtime import RuntimeContext  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,11 @@ def load_dotenv() -> None:
 
 
 def load_runtime_env(profile: str | None = None, env_file: str | None = None) -> profile_env.ProfileEnv:
-    return profile_env.load_profile_env(profile, env_file)
+    return RuntimeContext.for_profile(profile, env_file).env
+
+
+def load_runtime_context(profile: str | None = None, env_file: str | None = None) -> RuntimeContext:
+    return RuntimeContext.for_profile(profile, env_file)
 
 
 def env_int(name: str, default: int) -> int:
@@ -432,45 +437,43 @@ def parse_args() -> argparse.Namespace:
     pre_parser.add_argument("--profile", default=profile_env.DEFAULT_PROFILE)
     pre_parser.add_argument("--env-file", default="")
     pre_args, _ = pre_parser.parse_known_args()
-    runtime_env = load_runtime_env(pre_args.profile, pre_args.env_file)
-    profile = runtime_env.profile
+    runtime_context = load_runtime_context(pre_args.profile, pre_args.env_file)
+    runtime_env = runtime_context.env
+    profile = runtime_context.profile
     parser = argparse.ArgumentParser(description="Run JumpServer check, sync Yuque report, and notify WeCom.")
     parser.add_argument("--profile", default=profile)
     parser.add_argument("--env-file", default=pre_args.env_file)
     parser.add_argument("--no-proxy", action="store_true")
-    parser.add_argument("--wait-timeout", type=int, default=env_int("CHECK_WAIT_TIMEOUT", 1200))
-    parser.add_argument("--poll-interval", type=int, default=env_int("CHECK_POLL_INTERVAL", 30))
-    parser.add_argument("--output-dir", default=profile_env.profile_default_path(runtime_env, "CHECK_OUTPUT_DIR", "reports/yuque"))
-    parser.add_argument("--raw-output-dir", default=profile_env.profile_default_path(runtime_env, "CHECK_RAW_OUTPUT_DIR", "artifacts/raw"))
-    parser.add_argument(
-        "--resume-state",
-        default=str(PROJECT_ROOT / profile_env.profile_path("artifacts/state", profile) / "jms-host-ip-check-inflight.json"),
-    )
-    parser.add_argument("--retention-count", type=int, default=env_int("CHECK_RETENTION_COUNT", 12))
+    parser.add_argument("--wait-timeout", type=int, default=runtime_context.wait_timeout)
+    parser.add_argument("--poll-interval", type=int, default=runtime_context.poll_interval)
+    parser.add_argument("--output-dir", default=str(runtime_context.output_dir))
+    parser.add_argument("--raw-output-dir", default=str(runtime_context.raw_output_dir))
+    parser.add_argument("--resume-state", default=str(runtime_context.resume_state))
+    parser.add_argument("--retention-count", type=int, default=runtime_context.retention_count)
     parser.add_argument("--run-id", default="")
     parser.add_argument(
         "--run-source",
         choices=("weekly_scheduled", "manual", "dry_run", "tmp_probe"),
-        default=os.getenv("CHECK_RUN_SOURCE", "manual"),
+        default=runtime_context.run_source,
     )
     parser.add_argument("--cleanup-evidence-eligible", action="store_true")
-    parser.add_argument("--ip-reachability-check", action=argparse.BooleanOptionalAction, default=(os.getenv("CHECK_IP_REACHABILITY", "true").lower() in {"1", "true", "yes"}))
-    parser.add_argument("--ip-ping-count", type=int, default=env_int("CHECK_IP_PING_COUNT", 1))
-    parser.add_argument("--ip-ping-timeout", type=int, default=env_int("CHECK_IP_PING_TIMEOUT", 1))
-    parser.add_argument("--ip-ping-workers", type=int, default=env_int("CHECK_IP_PING_WORKERS", 32))
-    parser.add_argument("--tcp-reachability-check", action=argparse.BooleanOptionalAction, default=(os.getenv("CHECK_TCP_REACHABILITY", "false").lower() in {"1", "true", "yes"}))
-    parser.add_argument("--tcp-reachability-ports", default=os.getenv("CHECK_TCP_REACHABILITY_PORTS", "22"))
-    parser.add_argument("--tcp-reachability-timeout", type=int, default=env_int("CHECK_TCP_REACHABILITY_TIMEOUT", 1))
-    parser.add_argument("--tcp-reachability-workers", type=int, default=env_int("CHECK_TCP_REACHABILITY_WORKERS", 32))
+    parser.add_argument("--ip-reachability-check", action=argparse.BooleanOptionalAction, default=runtime_context.ip_reachability_check)
+    parser.add_argument("--ip-ping-count", type=int, default=runtime_context.ip_ping_count)
+    parser.add_argument("--ip-ping-timeout", type=int, default=runtime_context.ip_ping_timeout)
+    parser.add_argument("--ip-ping-workers", type=int, default=runtime_context.ip_ping_workers)
+    parser.add_argument("--tcp-reachability-check", action=argparse.BooleanOptionalAction, default=runtime_context.tcp_reachability_check)
+    parser.add_argument("--tcp-reachability-ports", default=runtime_context.tcp_reachability_ports)
+    parser.add_argument("--tcp-reachability-timeout", type=int, default=runtime_context.tcp_reachability_timeout)
+    parser.add_argument("--tcp-reachability-workers", type=int, default=runtime_context.tcp_reachability_workers)
     parser.add_argument("--query", default="")
     parser.add_argument("--max-assets", type=int)
-    parser.add_argument("--yuque-title", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_TITLE", DEFAULT_TITLE))
-    parser.add_argument("--yuque-slug", default=profile_env.profile_default_name(runtime_env, "CHECK_YUQUE_SLUG", DEFAULT_SLUG, slug=True))
+    parser.add_argument("--yuque-title", default=runtime_context.yuque_title)
+    parser.add_argument("--yuque-slug", default=runtime_context.yuque_slug)
     parser.add_argument("--toc-uuid", default=os.getenv("YUQUE_TARGET_TOC_UUID", ""))
     parser.add_argument("--sibling-url", default=os.getenv("YUQUE_SIBLING_URL", ""))
     parser.add_argument(
         "--notify-title",
-        default=profile_env.profile_default_name(runtime_env, "CHECK_NOTIFY_TITLE", "JumpServer 每周主机巡检"),
+        default=runtime_context.notify_title,
     )
     parser.add_argument("--dry-run-yuque", action="store_true")
     parser.add_argument("--dry-run-notify", action="store_true")
